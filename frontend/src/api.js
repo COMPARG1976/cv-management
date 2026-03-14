@@ -1,0 +1,218 @@
+/**
+ * HTTP client wrapper per il backend CV Management.
+ * Pattern identico a IT_RESOURCE_MGMT: fetch + Bearer token + error extraction.
+ */
+const BASE_URL = import.meta.env.VITE_API_URL || "http://localhost:8002";
+
+async function apiFetch(path, options = {}, token = null) {
+  const headers = { "Content-Type": "application/json", ...options.headers };
+  if (token) headers["Authorization"] = `Bearer ${token}`;
+
+  const res = await fetch(`${BASE_URL}${path}`, { ...options, headers });
+  if (!res.ok) {
+    let message = `HTTP ${res.status}`;
+    try {
+      const body = await res.json();
+      message = body.detail || JSON.stringify(body.errors) || message;
+    } catch (_) {}
+    throw new Error(message);
+  }
+  if (res.status === 204) return null;
+  return res.json();
+}
+
+// ── Auth ──────────────────────────────────────────────────────────────────────
+
+export async function login(email, password) {
+  const form = new URLSearchParams({ username: email, password });
+  const res = await fetch(`${BASE_URL}/auth/login`, {
+    method: "POST",
+    headers: { "Content-Type": "application/x-www-form-urlencoded" },
+    body: form,
+  });
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({}));
+    throw new Error(body.detail || "Login fallito");
+  }
+  return res.json();
+}
+
+export async function getAuthConfig() {
+  return apiFetch("/auth/config");
+}
+
+// ── Users (ADMIN) ─────────────────────────────────────────────────────────────
+
+export async function getUsers(token) {
+  return apiFetch("/users", {}, token);
+}
+
+export async function createUser(token, data) {
+  return apiFetch("/users", { method: "POST", body: JSON.stringify(data) }, token);
+}
+
+export async function updateUser(token, userId, data) {
+  return apiFetch(`/users/${userId}`, { method: "PUT", body: JSON.stringify(data) }, token);
+}
+
+// ── CV ────────────────────────────────────────────────────────────────────────
+
+export async function getMyCV(token) {
+  return apiFetch("/cv/me", {}, token);
+}
+
+export async function getCVByUserId(token, userId) {
+  return apiFetch(`/cv/${userId}`, {}, token);
+}
+
+export async function updateMyCV(token, data) {
+  return apiFetch("/cv/me", { method: "PUT", body: JSON.stringify(data) }, token);
+}
+
+// ── Skill ─────────────────────────────────────────────────────────────────────
+
+export async function addSkill(token, data) {
+  return apiFetch("/cv/me/skills", { method: "POST", body: JSON.stringify(data) }, token);
+}
+
+export async function updateSkill(token, skillId, data) {
+  return apiFetch(`/cv/me/skills/${skillId}`, { method: "PUT", body: JSON.stringify(data) }, token);
+}
+
+export async function deleteSkill(token, skillId) {
+  return apiFetch(`/cv/me/skills/${skillId}`, { method: "DELETE" }, token);
+}
+
+// ── Education ─────────────────────────────────────────────────────────────────
+
+export async function addEducation(token, data) {
+  return apiFetch("/cv/me/educations", { method: "POST", body: JSON.stringify(data) }, token);
+}
+
+export async function updateEducation(token, eduId, data) {
+  return apiFetch(`/cv/me/educations/${eduId}`, { method: "PUT", body: JSON.stringify(data) }, token);
+}
+
+export async function deleteEducation(token, eduId) {
+  return apiFetch(`/cv/me/educations/${eduId}`, { method: "DELETE" }, token);
+}
+
+// ── Language ──────────────────────────────────────────────────────────────────
+
+export async function addLanguage(token, data) {
+  return apiFetch("/cv/me/languages", { method: "POST", body: JSON.stringify(data) }, token);
+}
+
+export async function updateLanguage(token, langId, data) {
+  return apiFetch(`/cv/me/languages/${langId}`, { method: "PUT", body: JSON.stringify(data) }, token);
+}
+
+export async function deleteLanguage(token, langId) {
+  return apiFetch(`/cv/me/languages/${langId}`, { method: "DELETE" }, token);
+}
+
+// ── Role ──────────────────────────────────────────────────────────────────────
+
+export async function addRole(token, data) {
+  return apiFetch("/cv/me/roles", { method: "POST", body: JSON.stringify(data) }, token);
+}
+
+export async function deleteRole(token, roleId) {
+  return apiFetch(`/cv/me/roles/${roleId}`, { method: "DELETE" }, token);
+}
+
+// ── Reference ─────────────────────────────────────────────────────────────────
+
+export async function addReference(token, data) {
+  return apiFetch("/cv/me/references", { method: "POST", body: JSON.stringify(data) }, token);
+}
+
+export async function updateReference(token, refId, data) {
+  return apiFetch(`/cv/me/references/${refId}`, { method: "PUT", body: JSON.stringify(data) }, token);
+}
+
+export async function deleteReference(token, refId) {
+  return apiFetch(`/cv/me/references/${refId}`, { method: "DELETE" }, token);
+}
+
+// ── Certification ─────────────────────────────────────────────────────────────
+
+export async function addCertification(token, data) {
+  return apiFetch("/cv/me/certifications", { method: "POST", body: JSON.stringify(data) }, token);
+}
+
+export async function updateCertification(token, certId, data) {
+  return apiFetch(`/cv/me/certifications/${certId}`, { method: "PUT", body: JSON.stringify(data) }, token);
+}
+
+export async function deleteCertification(token, certId) {
+  return apiFetch(`/cv/me/certifications/${certId}`, { method: "DELETE" }, token);
+}
+
+// ── Experience ────────────────────────────────────────────────────────────────
+
+export async function addExperience(token, data) {
+  return apiFetch("/cv/me/experiences", { method: "POST", body: JSON.stringify(data) }, token);
+}
+
+export async function deleteExperience(token, expId) {
+  return apiFetch(`/cv/me/experiences/${expId}`, { method: "DELETE" }, token);
+}
+
+// ── Upload & Parsing ──────────────────────────────────────────────────────────
+
+export async function uploadCV(token, file) {
+  const formData = new FormData();
+  formData.append("file", file);
+  const res = await fetch(`${BASE_URL}/upload/cv`, {
+    method: "POST",
+    headers: { Authorization: `Bearer ${token}` },
+    body: formData,
+  });
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({}));
+    throw new Error(body.detail || "Upload fallito");
+  }
+  return res.json();
+}
+
+export async function getParseResult(token, documentId) {
+  return apiFetch(`/upload/parse-result/${documentId}`, {}, token);
+}
+
+// ── Skills (tassonomia + autocomplete) ────────────────────────────────────────
+
+export async function searchSkills(q, limit = 20) {
+  return apiFetch(`/skills?q=${encodeURIComponent(q)}&limit=${limit}`);
+}
+
+export async function getSkillSuggestions(token, q = "") {
+  return apiFetch(`/cv/skills/suggest?q=${encodeURIComponent(q)}&limit=20`, {}, token);
+}
+
+export async function getCertSuggestions(token, q = "") {
+  return apiFetch(`/cv/certifications/suggest?q=${encodeURIComponent(q)}&limit=20`, {}, token);
+}
+
+// ── Search / API Pubblica ─────────────────────────────────────────────────────
+
+export async function searchResources(token, params = {}) {
+  const qs = new URLSearchParams(params).toString();
+  return apiFetch(`/api/v1/resources/search?${qs}`, {}, token);
+}
+
+export async function getResources(token, params = {}) {
+  const qs = new URLSearchParams(params).toString();
+  return apiFetch(`/api/v1/resources?${qs}`, {}, token);
+}
+
+// ── Export ────────────────────────────────────────────────────────────────────
+
+export async function exportSearchExcel(token, params = {}) {
+  const qs = new URLSearchParams(params).toString();
+  const res = await fetch(`${BASE_URL}/export/excel?${qs}`, {
+    headers: { Authorization: `Bearer ${token}` },
+  });
+  if (!res.ok) throw new Error("Export fallito");
+  return res.blob();
+}
