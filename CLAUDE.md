@@ -198,6 +198,19 @@ AUTH_PROVIDER=fake
 
 ---
 
+### Sprint 3 — CV Upload con AI Parsing + Diff Review ✅ (2026-03-15)
+- Backend: `POST /upload/cv` — upload PDF/DOCX, chiamata AI service, calcolo diff campo per campo
+- Backend: `POST /upload/apply` — applica selezioni utente al DB (idempotente: skip duplicati per tutte le sezioni)
+- Backend: `compute_diff()` — fuzzy matching su 5 sezioni (skills, references, educations, certifications, languages)
+- Backend: mapping `degree_type_raw → DegreeLevel`, `level → rating(1-5)`, `category TECNICA→HARD`
+- Frontend: `UploadTab` — wizard 4 step (Upload → Processing → Review Diff → Success)
+- Frontend: `ReviewStep` — diff field-by-field con radio DB/AI/Manual, default conservativo "Mantieni DB"
+- Frontend: `ItemsSection` — sezioni tabellari (items new/changed/unchanged/db_only con badge colorati)
+- Frontend: `ProfileSection` — campi scalari del profilo con controllo per-field
+- Fix: sostituito `React.useState/useRef/useEffect` con hook named (mancava import React namespace)
+
+---
+
 ## Note per Claude Code
 
 - Il DB PostgreSQL è sulla porta host **5433** (non 5432)

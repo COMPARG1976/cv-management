@@ -206,6 +206,12 @@ export async function getResources(token, params = {}) {
   return apiFetch(`/api/v1/resources?${qs}`, {}, token);
 }
 
+// ── Upload & Diff Apply ───────────────────────────────────────────────────────
+
+export async function applyDiff(token, payload) {
+  return apiFetch("/upload/apply", { method: "POST", body: JSON.stringify(payload) }, token);
+}
+
 // ── Export ────────────────────────────────────────────────────────────────────
 
 export async function exportSearchExcel(token, params = {}) {

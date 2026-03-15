@@ -11,6 +11,7 @@ import {
   addReference, updateReference, deleteReference,
   addCertification, updateCertification, deleteCertification,
   getSkillSuggestions, getCertSuggestions,
+  uploadCV, applyDiff,
 } from "./api.js";
 
 // ── Costanti ──────────────────────────────────────────────────────────────────
@@ -317,7 +318,7 @@ function MyCVView({ token, currentUser, onBack }) {
       {cv && activeTab === "esperienze"  && <EsperienzeTab    {...tabProps} />}
       {cv && activeTab === "cert"        && <CertificazioniTab {...tabProps} />}
       {cv && activeTab === "lingue"      && <LingueTab        {...tabProps} />}
-      {cv && activeTab === "upload"      && <UploadTab />}
+      {cv && activeTab === "upload"      && <UploadTab {...tabProps} />}
     </>
   );
 }
@@ -659,8 +660,8 @@ function EsperienzeTab({ token, cv, setCV }) {
       company_name:        r.company_name        || "",
       client_name:         r.client_name         || "",
       role:                r.role                || "",
-      start_date:          r.start_date          || "",
-      end_date:            r.end_date            || "",
+      start_date:          (r.start_date || "").slice(0, 7),
+      end_date:            (r.end_date   || "").slice(0, 7),
       is_current:          r.is_current          || false,
       project_description: r.project_description || "",
       activities:          r.activities          || "",
@@ -725,12 +726,12 @@ function EsperienzeTab({ token, cv, setCV }) {
       </div>
       <div className="form-row">
         <div className="form-group">
-          <label>Data inizio</label>
-          <input type="date" value={form.start_date} onChange={e => upd("start_date", e.target.value)} />
+          <label>Data inizio (mese/anno)</label>
+          <input type="month" value={form.start_date} onChange={e => upd("start_date", e.target.value)} />
         </div>
         <div className="form-group">
-          <label>Data fine</label>
-          <input type="date" value={form.end_date} disabled={form.is_current} onChange={e => upd("end_date", e.target.value)} />
+          <label>Data fine (mese/anno)</label>
+          <input type="month" value={form.end_date} disabled={form.is_current} onChange={e => upd("end_date", e.target.value)} />
         </div>
       </div>
       <div className="form-group">
@@ -1292,18 +1293,576 @@ function LingueTab({ token, cv, setCV }) {
 }
 
 // ── Upload Tab ────────────────────────────────────────────────────────────────
-function UploadTab() {
+
+// Init selections from diff result (default: conservative — mantieni DB)
+function initSelections(diff) {
+  const profileSel = {};
+  for (const fd of (diff.profile?.field_diffs || [])) {
+    profileSel[fd.field] = { source: fd.status === "new_ai" ? "ai" : "db", manual: "" };
+  }
+  function initItems(items) {
+    return (items || []).map(item => {
+      if (item.status === "new") return { action: "add" };
+      if (item.status === "changed") {
+        const fieldSrc = {};
+        for (const fd of (item.field_diffs || [])) {
+          if (fd.status !== "unchanged") fieldSrc[fd.field] = "db";
+        }
+        return { action: "update", field_sources: fieldSrc, manuals: {} };
+      }
+      return { action: "skip" };
+    });
+  }
+  return {
+    profile:        profileSel,
+    skills:         initItems(diff.skills?.items),
+    references:     initItems(diff.references?.items),
+    educations:     initItems(diff.educations?.items),
+    certifications: initItems(diff.certifications?.items),
+    languages:      initItems(diff.languages?.items),
+  };
+}
+
+// Build the apply request payload from selections
+function buildApplyRequest(diff, selections) {
+  const req = {
+    document_id:     diff.document_id,
+    profile_updates: {},
+    skills:         { add: [], update: [] },
+    references:     { add: [], update: [] },
+    educations:     { add: [], update: [] },
+    certifications: { add: [], update: [] },
+    languages:      { add: [], update: [] },
+  };
+  for (const fd of (diff.profile?.field_diffs || [])) {
+    const sel = selections.profile[fd.field];
+    if (!sel) continue;
+    if (sel.source === "ai" && fd.status !== "unchanged") {
+      req.profile_updates[fd.field] = fd.ai_value;
+    } else if (sel.source === "manual" && sel.manual !== "") {
+      req.profile_updates[fd.field] = sel.manual;
+    }
+  }
+  function buildSection(diffItems, selItems, key) {
+    (diffItems || []).forEach((item, i) => {
+      const sel = selItems?.[i];
+      if (!sel || sel.action === "skip") return;
+      if (sel.action === "add" && item.status === "new") {
+        req[key].add.push(item.ai_data);
+      } else if (sel.action === "update" && item.db_id) {
+        const upd = { db_id: item.db_id };
+        for (const fd of (item.field_diffs || [])) {
+          if (fd.status === "unchanged") continue;
+          const src = sel.field_sources?.[fd.field] || "db";
+          if (src === "ai") upd[fd.field] = fd.ai_value;
+          else if (src === "manual") upd[fd.field] = sel.manuals?.[fd.field] ?? fd.db_value;
+        }
+        if (Object.keys(upd).length > 1) req[key].update.push(upd);
+      }
+    });
+  }
+  buildSection(diff.skills?.items,         selections.skills,         "skills");
+  buildSection(diff.references?.items,     selections.references,     "references");
+  buildSection(diff.educations?.items,     selections.educations,     "educations");
+  buildSection(diff.certifications?.items, selections.certifications, "certifications");
+  buildSection(diff.languages?.items,      selections.languages,      "languages");
+  return req;
+}
+
+function countChanges(diff, selections) {
+  let n = 0;
+  for (const fd of (diff.profile?.field_diffs || [])) {
+    const sel = selections.profile[fd.field];
+    if (sel && sel.source !== "db" && fd.status !== "unchanged") n++;
+  }
+  const secs = ["skills","references","educations","certifications","languages"];
+  for (const sec of secs) {
+    (diff[sec]?.items || []).forEach((item, i) => {
+      const sel = selections[sec]?.[i];
+      if (!sel) return;
+      if (item.status === "new" && sel.action === "add") n++;
+      else if (item.status === "changed" && sel.action === "update") {
+        if (Object.values(sel.field_sources || {}).some(s => s !== "db")) n++;
+      }
+    });
+  }
+  return n;
+}
+
+// ── Upload sub-components ─────────────────────────────────────────────────────
+
+function UploadDropZone({ onFile, error }) {
+  const [dragging, setDragging] = useState(false);
+  const inputRef = useRef(null);
+  function handleDrop(e) {
+    e.preventDefault(); setDragging(false);
+    const f = e.dataTransfer.files?.[0];
+    if (f) onFile(f);
+  }
   return (
-    <div className="card">
-      <div className="empty-state">
-        <div className="empty-state__icon">📤</div>
-        <h3>Carica CV — Sprint 3</h3>
-        <p>Il caricamento e parsing automatico del CV sarà disponibile nel prossimo sprint.</p>
+    <div>
+      <div
+        className={"upload-zone" + (dragging ? " upload-zone--drag" : "")}
+        onDragOver={e => { e.preventDefault(); setDragging(true); }}
+        onDragLeave={() => setDragging(false)}
+        onDrop={handleDrop}
+        onClick={() => inputRef.current?.click()}
+      >
+        <div style={{fontSize:48,marginBottom:12}}>📄</div>
+        <p style={{fontWeight:600,marginBottom:4}}>Trascina il CV qui oppure clicca per scegliere</p>
+        <p style={{fontSize:13,color:"var(--color-text-muted)"}}>PDF o DOCX · max 10 MB</p>
+        <input ref={inputRef} type="file" accept=".pdf,.docx,.doc" style={{display:"none"}}
+          onChange={e => e.target.files?.[0] && onFile(e.target.files[0])} />
+      </div>
+      {error && <div className="alert alert--danger" style={{marginTop:12}}>{error}</div>}
+    </div>
+  );
+}
+
+function ProcessingStep() {
+  const steps = ["Estrazione testo...", "Analisi sezioni...", "Mappatura dati...", "Calcolo differenze..."];
+  const [current, setCurrent] = useState(0);
+  useEffect(() => {
+    const t = setInterval(() => setCurrent(p => Math.min(p + 1, steps.length - 1)), 5000);
+    return () => clearInterval(t);
+  }, []);
+  return (
+    <div className="card" style={{textAlign:"center",padding:"48px 32px"}}>
+      <div style={{fontSize:48,marginBottom:16}}>⏳</div>
+      <h3 style={{marginBottom:24}}>Analisi AI in corso...</h3>
+      <div style={{background:"var(--color-border)",borderRadius:8,height:8,maxWidth:400,margin:"0 auto 24px"}}>
+        <div style={{height:8,borderRadius:8,background:"var(--color-primary)",
+          width:`${((current+1)/steps.length)*100}%`,transition:"width 0.8s ease"}} />
+      </div>
+      <div style={{display:"flex",flexDirection:"column",gap:8,maxWidth:300,margin:"0 auto",textAlign:"left"}}>
+        {steps.map((s, i) => (
+          <div key={i} style={{display:"flex",alignItems:"center",gap:8,opacity:i<=current?1:0.35}}>
+            <span>{i < current ? "✓" : i === current ? "⏳" : "○"}</span>
+            <span style={{fontSize:13}}>{s}</span>
+          </div>
+        ))}
       </div>
     </div>
   );
 }
 
+function StatusBadge({ status }) {
+  const map = {
+    new:       { label:"NUOVO",     bg:"#dcfce7", color:"#166534" },
+    changed:   { label:"MODIFICA",  bg:"#fef9c3", color:"#854d0e" },
+    unchanged: { label:"INVARIATO", bg:"#f1f5f9", color:"#475569" },
+    db_only:   { label:"SOLO DB",   bg:"#eff6ff", color:"#1e40af" },
+  };
+  const { label, bg, color } = map[status] || { label:status, bg:"#f1f5f9", color:"#475569" };
+  return (
+    <span style={{fontSize:11,fontWeight:700,padding:"2px 8px",borderRadius:12,
+      background:bg,color,whiteSpace:"nowrap"}}>{label}</span>
+  );
+}
+
+function FieldControl({ fd, source, manual, onSource, onManual }) {
+  if (!fd || fd.status === "unchanged" || fd.status === "db_only") return null;
+  return (
+    <div style={{background:"#f8fafc",borderRadius:6,padding:"10px 12px",marginBottom:8}}>
+      <div style={{fontWeight:600,fontSize:12,marginBottom:8,color:"var(--color-text-muted)",textTransform:"uppercase"}}>{fd.label}</div>
+      <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:8,marginBottom:8}}>
+        <div style={{background:"#fff",border:"1px solid var(--color-border)",borderRadius:4,padding:"6px 10px",fontSize:13}}>
+          <div style={{fontSize:10,color:"var(--color-text-muted)",marginBottom:2}}>DB ATTUALE</div>
+          <div>{fd.db_value != null ? String(fd.db_value) : <em style={{color:"var(--color-text-muted)"}}>—</em>}</div>
+        </div>
+        <div style={{background:"#eff6ff",border:"1px solid #bfdbfe",borderRadius:4,padding:"6px 10px",fontSize:13}}>
+          <div style={{fontSize:10,color:"#1e40af",marginBottom:2}}>AI ESTRATTO</div>
+          <div>{fd.ai_value != null ? String(fd.ai_value) : <em style={{color:"var(--color-text-muted)"}}>—</em>}</div>
+        </div>
+      </div>
+      <div style={{display:"flex",gap:16}}>
+        {["db","ai","manual"].map(s => (
+          <label key={s} style={{display:"flex",alignItems:"center",gap:4,cursor:"pointer",fontSize:13}}>
+            <input type="radio" checked={source === s} onChange={() => onSource(s)} />
+            {s === "db" ? "Mantieni DB" : s === "ai" ? "Usa AI" : "Modifica manuale"}
+          </label>
+        ))}
+      </div>
+      {source === "manual" && (
+        <input className="form-control" style={{marginTop:8}}
+          value={manual || ""} placeholder="Inserisci valore..."
+          onChange={e => onManual(e.target.value)} />
+      )}
+    </div>
+  );
+}
+
+function ProfileSection({ diff, selections, setSelections }) {
+  const allFds    = diff.profile?.field_diffs || [];
+  const activeFds = allFds.filter(fd => fd.status !== "unchanged" && fd.status !== "db_only");
+  if (activeFds.length === 0) return (
+    <div style={{background:"#fff",border:"1px solid var(--color-border)",borderRadius:8,padding:"16px 20px",marginBottom:16}}>
+      <div style={{display:"flex",alignItems:"center",gap:8}}>
+        <span style={{fontWeight:600}}>👤 Anagrafica</span>
+        <StatusBadge status="unchanged" />
+        <span style={{fontSize:12,color:"var(--color-text-muted)"}}>Nessuna modifica trovata</span>
+      </div>
+    </div>
+  );
+  function upd(field, key, val) {
+    setSelections(prev => ({...prev, profile: {...prev.profile, [field]: {...prev.profile[field], [key]: val}}}));
+  }
+  return (
+    <div style={{background:"#fff",border:"1px solid var(--color-border)",borderRadius:8,padding:"16px 20px",marginBottom:16}}>
+      <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:12,flexWrap:"wrap"}}>
+        <span style={{fontWeight:600}}>👤 Anagrafica</span>
+        <span style={{fontSize:12,color:"var(--color-text-muted)"}}>
+          Confidenza: {Math.round((diff.profile?.confidence||0)*100)}% · {activeFds.length} campo/i da rivedere
+        </span>
+        <button className="btn btn-sm btn-secondary" style={{marginLeft:"auto"}}
+          onClick={() => {
+            const p = {...selections.profile};
+            activeFds.forEach(fd => { p[fd.field] = {source:"ai",manual:""}; });
+            setSelections(prev => ({...prev, profile: p}));
+          }}>Accetta tutto AI</button>
+      </div>
+      {activeFds.map(fd => (
+        <FieldControl key={fd.field} fd={fd}
+          source={selections.profile[fd.field]?.source || "db"}
+          manual={selections.profile[fd.field]?.manual || ""}
+          onSource={s => upd(fd.field, "source", s)}
+          onManual={v => upd(fd.field, "manual", v)} />
+      ))}
+    </div>
+  );
+}
+
+function ItemsSection({ icon, title, sectionKey, diff, selections, setSelections }) {
+  const sec   = diff[sectionKey] || {};
+  const items = sec.items || [];
+  const [showUnchanged, setShowUnchanged] = useState(false);
+  const [showDbOnly,    setShowDbOnly]    = useState(false);
+
+  const activeItems   = items.filter(i => i.status === "new" || i.status === "changed");
+  const unchangedItems= items.filter(i => i.status === "unchanged");
+  const dbOnlyItems   = items.filter(i => i.status === "db_only");
+
+  function updSel(idx, patch) {
+    setSelections(prev => {
+      const arr = [...(prev[sectionKey] || [])];
+      arr[idx] = { ...arr[idx], ...patch };
+      return { ...prev, [sectionKey]: arr };
+    });
+  }
+  function updFieldSrc(idx, field, src) {
+    setSelections(prev => {
+      const arr = [...(prev[sectionKey] || [])];
+      arr[idx] = { ...arr[idx], field_sources: { ...(arr[idx].field_sources || {}), [field]: src } };
+      return { ...prev, [sectionKey]: arr };
+    });
+  }
+  function updManual(idx, field, val) {
+    setSelections(prev => {
+      const arr = [...(prev[sectionKey] || [])];
+      arr[idx] = { ...arr[idx], manuals: { ...(arr[idx].manuals || {}), [field]: val } };
+      return { ...prev, [sectionKey]: arr };
+    });
+  }
+  function acceptAll() {
+    setSelections(prev => {
+      const arr = [...(prev[sectionKey] || [])].map((sel, i) => {
+        const item = items[i];
+        if (!item) return sel;
+        if (item.status === "new") return { action: "add" };
+        if (item.status === "changed") {
+          const fs = {};
+          (item.field_diffs || []).filter(fd => fd.status !== "unchanged").forEach(fd => { fs[fd.field] = "ai"; });
+          return { action: "update", field_sources: fs, manuals: {} };
+        }
+        return sel;
+      });
+      return { ...prev, [sectionKey]: arr };
+    });
+  }
+
+  if (items.length === 0) return null;
+
+  function getSummary(item) {
+    const d = item.ai_data || item.db_data || {};
+    return d.skill_name || d.company_name || d.institution || d.name || d.language_name || "—";
+  }
+
+  function renderItem(item, idx) {
+    const sel = selections[sectionKey]?.[idx];
+    const d   = item.ai_data || {};
+
+    if (item.status === "new") {
+      const rows = Object.entries(d).filter(([k,v]) => v !== null && v !== undefined && v !== "" && !["level_label","years_experience","degree_type_raw","client_name","activities"].includes(k));
+      return (
+        <div key={idx} style={{border:"1px solid #86efac",borderRadius:6,padding:"12px 14px",marginBottom:8,background:"#f0fdf4"}}>
+          <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:8}}>
+            <StatusBadge status="new" />
+            <span style={{fontWeight:600,fontSize:14}}>{getSummary(item)}</span>
+            {d.level_label && <span style={{fontSize:12,color:"#166534"}}>· {d.level_label}{d.years_experience ? ` · ${d.years_experience} anni` : ""}</span>}
+            <label style={{marginLeft:"auto",display:"flex",alignItems:"center",gap:4,cursor:"pointer",fontSize:13}}>
+              <input type="checkbox" checked={sel?.action === "add"}
+                onChange={e => updSel(idx, { action: e.target.checked ? "add" : "skip" })} />
+              Aggiungi
+            </label>
+          </div>
+          <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:"4px 12px"}}>
+            {rows.slice(0,6).map(([k,v]) => (
+              <div key={k} style={{fontSize:12,color:"#166534"}}>
+                <span style={{fontWeight:600}}>{k.replace(/_/g," ")}: </span>
+                <span>{Array.isArray(v) ? v.join(", ") : String(v)}</span>
+              </div>
+            ))}
+          </div>
+        </div>
+      );
+    }
+
+    if (item.status === "changed") {
+      const changedFds = (item.field_diffs || []).filter(fd => fd.status !== "unchanged" && fd.status !== "db_only");
+      return (
+        <div key={idx} style={{border:"1px solid #fde68a",borderRadius:6,padding:"12px 14px",marginBottom:8,background:"#fffbeb"}}>
+          <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:changedFds.length>0?12:0}}>
+            <StatusBadge status="changed" />
+            <span style={{fontWeight:600,fontSize:14}}>{getSummary(item)}</span>
+            <label style={{marginLeft:"auto",display:"flex",alignItems:"center",gap:4,cursor:"pointer",fontSize:13}}>
+              <input type="checkbox" checked={sel?.action === "update"}
+                onChange={e => updSel(idx, { action: e.target.checked ? "update" : "skip" })} />
+              Aggiorna
+            </label>
+          </div>
+          {changedFds.map(fd => (
+            <FieldControl key={fd.field} fd={fd}
+              source={sel?.field_sources?.[fd.field] || "db"}
+              manual={sel?.manuals?.[fd.field] || ""}
+              onSource={s => updFieldSrc(idx, fd.field, s)}
+              onManual={v => updManual(idx, fd.field, v)} />
+          ))}
+        </div>
+      );
+    }
+    return null;
+  }
+
+  const hasChanges = sec.count_new > 0 || sec.count_changed > 0;
+
+  return (
+    <div style={{background:"#fff",border:"1px solid var(--color-border)",borderRadius:8,padding:"16px 20px",marginBottom:16}}>
+      <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:12,flexWrap:"wrap"}}>
+        <span style={{fontWeight:600}}>{icon} {title}</span>
+        <span style={{fontSize:12,color:"var(--color-text-muted)"}}>
+          Confidenza: {Math.round((sec.confidence||0)*100)}%
+          {sec.count_new>0      && ` · ${sec.count_new} nuovi`}
+          {sec.count_changed>0  && ` · ${sec.count_changed} modificati`}
+          {sec.count_unchanged>0 && ` · ${sec.count_unchanged} invariati`}
+        </span>
+        {hasChanges && (
+          <button className="btn btn-sm btn-secondary" style={{marginLeft:"auto"}} onClick={acceptAll}>
+            Accetta tutto AI
+          </button>
+        )}
+      </div>
+
+      {activeItems.length === 0 && (
+        <p style={{fontSize:13,color:"var(--color-text-muted)"}}>Nessuna aggiunta o modifica trovata.</p>
+      )}
+      {items.map((item, idx) => renderItem(item, idx)).filter(Boolean)}
+
+      {unchangedItems.length > 0 && (
+        <div style={{marginTop:8}}>
+          <button className="btn btn-sm btn-secondary" onClick={() => setShowUnchanged(p=>!p)}>
+            {showUnchanged ? "Nascondi" : "Mostra"} {unchangedItems.length} invariati
+          </button>
+          {showUnchanged && unchangedItems.map((item, i) => (
+            <div key={i} style={{display:"flex",alignItems:"center",gap:8,padding:"6px 0",fontSize:13,borderBottom:"1px solid var(--color-border)"}}>
+              <StatusBadge status="unchanged" /><span>{getSummary(item)}</span>
+            </div>
+          ))}
+        </div>
+      )}
+
+      {dbOnlyItems.length > 0 && (
+        <div style={{marginTop:8}}>
+          <button className="btn btn-sm btn-secondary" onClick={() => setShowDbOnly(p=>!p)}>
+            {showDbOnly ? "Nascondi" : "Mostra"} {dbOnlyItems.length} presenti nel profilo, non trovati nel CV
+          </button>
+          {showDbOnly && (
+            <div style={{marginTop:8,padding:"10px 12px",background:"#f1f5f9",borderRadius:6,fontSize:13}}>
+              <p style={{marginBottom:8,color:"var(--color-text-muted)"}}>
+                Queste voci rimangono nel profilo. Per rimuoverle usa le tab dedicate.
+              </p>
+              {dbOnlyItems.map((item, i) => (
+                <div key={i} style={{display:"flex",alignItems:"center",gap:8,padding:"4px 0"}}>
+                  <StatusBadge status="db_only" /><span>{getSummary(item)}</span>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function ReviewStep({ diff, selections, setSelections, onApply, onCancel, applying, error }) {
+  const nChanges = countChanges(diff, selections);
+  const conf = Math.round((diff.overall_confidence || 0) * 100);
+
+  function acceptAll() {
+    const fresh = initSelections(diff);
+    for (const k of Object.keys(fresh.profile)) {
+      const fd = (diff.profile?.field_diffs||[]).find(f => f.field === k);
+      if (fd && fd.status !== "unchanged") fresh.profile[k].source = "ai";
+    }
+    ["skills","references","educations","certifications","languages"].forEach(sec => {
+      fresh[sec] = fresh[sec].map((sel, i) => {
+        const item = diff[sec]?.items?.[i];
+        if (!item) return sel;
+        if (item.status === "new") return { action: "add" };
+        if (item.status === "changed") {
+          const fs = {};
+          (item.field_diffs||[]).filter(fd=>fd.status!=="unchanged").forEach(fd=>{fs[fd.field]="ai";});
+          return { action:"update", field_sources:fs, manuals:{} };
+        }
+        return sel;
+      });
+    });
+    setSelections(fresh);
+  }
+
+  return (
+    <div>
+      {/* Riepilogo header */}
+      <div style={{background:"#fff",border:"1px solid var(--color-border)",borderRadius:8,padding:"16px 20px",marginBottom:16,display:"flex",alignItems:"center",gap:16,flexWrap:"wrap"}}>
+        <span style={{fontWeight:700,fontSize:16}}>Revisione modifiche estratte</span>
+        <span style={{fontSize:13,color:"var(--color-text-muted)"}}>Confidenza AI: <strong>{conf}%</strong></span>
+        <div style={{marginLeft:"auto",display:"flex",gap:8}}>
+          <button className="btn btn-sm btn-secondary" onClick={() => setSelections(initSelections(diff))}>Deseleziona tutto</button>
+          <button className="btn btn-sm btn-primary"   onClick={acceptAll}>Accetta tutto AI</button>
+        </div>
+      </div>
+      <p style={{fontSize:12,color:"var(--color-text-muted)",marginBottom:16}}>
+        Legenda: <strong style={{color:"#166534"}}>NUOVO</strong> = aggiunta · <strong style={{color:"#854d0e"}}>MODIFICA</strong> = da rivedere · INVARIATO = nessuna azione · SOLO DB = non nel CV
+      </p>
+
+      <ProfileSection diff={diff} selections={selections} setSelections={setSelections} />
+      <ItemsSection icon="🛠" title="Competenze"     sectionKey="skills"         diff={diff} selections={selections} setSelections={setSelections} />
+      <ItemsSection icon="💼" title="Esperienze"     sectionKey="references"     diff={diff} selections={selections} setSelections={setSelections} />
+      <ItemsSection icon="🎓" title="Formazione"     sectionKey="educations"     diff={diff} selections={selections} setSelections={setSelections} />
+      <ItemsSection icon="🏅" title="Certificazioni" sectionKey="certifications" diff={diff} selections={selections} setSelections={setSelections} />
+      <ItemsSection icon="🌍" title="Lingue"         sectionKey="languages"      diff={diff} selections={selections} setSelections={setSelections} />
+
+      {error && <div className="alert alert--danger" style={{marginBottom:12}}>{error}</div>}
+
+      <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",
+        padding:"16px 0",borderTop:"1px solid var(--color-border)",marginTop:8}}>
+        <button className="btn btn-secondary" onClick={onCancel}>Annulla</button>
+        <button className="btn btn-primary" onClick={onApply}
+          disabled={applying || nChanges === 0}>
+          {applying ? "Applicando..." : nChanges === 0 ? "Nessuna modifica selezionata" : `Applica ${nChanges} modifica/e`}
+        </button>
+      </div>
+    </div>
+  );
+}
+
+function SuccessStep({ result, onReset }) {
+  const { sections = {}, applied_count = 0 } = result || {};
+  const labels = { profile:"Anagrafica", skills:"Competenze", references:"Esperienze",
+    educations:"Formazione", certifications:"Certificazioni", languages:"Lingue" };
+  return (
+    <div className="card" style={{textAlign:"center",padding:"48px 32px"}}>
+      <div style={{fontSize:56,marginBottom:12}}>✅</div>
+      <h3 style={{marginBottom:8}}>{applied_count} modifiche applicate</h3>
+      <p style={{color:"var(--color-text-muted)",marginBottom:24}}>
+        Il profilo CV è stato aggiornato con i dati estratti.
+      </p>
+      <div style={{display:"flex",flexWrap:"wrap",justifyContent:"center",gap:8,marginBottom:32}}>
+        {Object.entries(sections).filter(([,v])=>v>0).map(([k,v])=>(
+          <span key={k} style={{background:"#dcfce7",color:"#166534",fontSize:13,fontWeight:600,padding:"4px 12px",borderRadius:12}}>
+            {labels[k]||k}: +{v}
+          </span>
+        ))}
+      </div>
+      <div style={{display:"flex",gap:12,justifyContent:"center"}}>
+        <button className="btn btn-secondary" onClick={onReset}>Carica altro CV</button>
+      </div>
+    </div>
+  );
+}
+
+function UploadTab({ token, cv, setCV }) {
+  const [step, setStep]               = useState("upload");
+  const [diff, setDiff]               = useState(null);
+  const [selections, setSelections]   = useState(null);
+  const [applying, setApplying]       = useState(false);
+  const [error, setError]             = useState(null);
+  const [applyResult, setApplyResult] = useState(null);
+
+  async function handleFile(file) {
+    setError(null);
+    setStep("processing");
+    try {
+      const result = await uploadCV(token, file);
+      setDiff(result);
+      setSelections(initSelections(result));
+      setStep("review");
+    } catch (e) {
+      setError(e.message);
+      setStep("upload");
+    }
+  }
+
+  async function handleApply() {
+    setApplying(true);
+    setError(null);
+    try {
+      const req = buildApplyRequest(diff, selections);
+      const res = await applyDiff(token, req);
+      setApplyResult(res);
+      const fresh = await getMyCV(token);
+      setCV(fresh);
+      setStep("success");
+    } catch (e) {
+      setError(e.message);
+    } finally {
+      setApplying(false);
+    }
+  }
+
+  function reset() {
+    setStep("upload"); setDiff(null); setSelections(null);
+    setApplyResult(null); setError(null);
+  }
+
+  if (step === "processing") return <ProcessingStep />;
+  if (step === "success")    return <SuccessStep result={applyResult} onReset={reset} />;
+  if (step === "review" && diff && selections) {
+    return <ReviewStep diff={diff} selections={selections} setSelections={setSelections}
+      onApply={handleApply} onCancel={reset} applying={applying} error={error} />;
+  }
+
+  return (
+    <div className="card">
+      <h3 style={{marginBottom:8}}>Carica CV</h3>
+      <p style={{color:"var(--color-text-muted)",marginBottom:24}}>
+        Carica il tuo CV (PDF o DOCX). L'AI estrarrà i dati e potrai scegliere
+        campo per campo cosa aggiornare nel profilo.
+      </p>
+      <UploadDropZone onFile={handleFile} error={error} />
+      {(cv?.documents?.length || 0) > 0 && (
+        <div style={{marginTop:20,paddingTop:16,borderTop:"1px solid var(--color-border)"}}>
+          <p style={{fontSize:13,color:"var(--color-text-muted)",marginBottom:8}}>Documenti caricati in precedenza:</p>
+          {cv.documents.slice(0,3).map(doc => (
+            <div key={doc.id} style={{display:"flex",justifyContent:"space-between",fontSize:13,padding:"4px 0"}}>
+              <span>{doc.original_filename}</span>
+              <span style={{color:"var(--color-text-muted)"}}>{doc.parse_status}</span>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
 // ── Placeholder View ──────────────────────────────────────────────────────────
 function PlaceholderView({ title, onBack, sprint }) {
   return (

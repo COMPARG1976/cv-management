@@ -74,9 +74,8 @@ app.include_router(cv.router, prefix="/cv", tags=["cv"])
 # from app.routers import skills
 # app.include_router(skills.router, prefix="/skills", tags=["skills"])
 
-# TODO Sprint 3: upload router
-# from app.routers import upload
-# app.include_router(upload.router, prefix="/upload", tags=["upload"])
+from app.routers import upload
+app.include_router(upload.router, prefix="/upload", tags=["upload"])
 
 # TODO Sprint 4: search + API pubblica
 # from app.routers import search
