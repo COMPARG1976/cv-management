@@ -11,6 +11,7 @@ import {
   addReference, updateReference, deleteReference,
   addCertification, updateCertification, deleteCertification,
   uploadCertDoc, previewCredlyBadges, importCredlyBadges,
+  searchCertCatalog, suggestCertCodes,
   getSkillSuggestions, getCertSuggestions,
   uploadCV, applyDiff, getCVHints,
   listExportTemplates, exportCVDocx,
@@ -1030,6 +1031,7 @@ function CertificazioniTab({ token, cv, setCV, hints = {} }) {
   const [credlyError, setCredlyError]       = useState("");
   const [credlyImporting, setCredlyImporting] = useState(false);
   const [credlyImportResult, setCredlyImportResult] = useState(null);  // {imported, updated}
+  const [catalogSuggestions, setCatalogSuggestions] = useState({});    // {cert_id: {name,cert_code,vendor}}
 
   const emptyForm = () => ({
     cert_code: "", name: "", issuing_org: "", year: "",
@@ -1038,6 +1040,17 @@ function CertificazioniTab({ token, cv, setCV, hints = {} }) {
     credly_badge_id: "", badge_image_url: "",
   });
   const [form, setForm] = useState(emptyForm());
+
+  useEffect(() => {
+    const missing = {};
+    (cv?.certifications || []).forEach(c => {
+      if (!c.cert_code) missing[String(c.id)] = c.name;
+    });
+    if (Object.keys(missing).length === 0) { setCatalogSuggestions({}); return; }
+    suggestCertCodes(token, missing)
+      .then(data => setCatalogSuggestions(data || {}))
+      .catch(() => {});
+  }, [cv?.certifications]);
   function upd(k, v) { setForm(f => ({ ...f, [k]: v })); }
 
   function openAdd() {
@@ -1223,6 +1236,24 @@ function CertificazioniTab({ token, cv, setCV, hints = {} }) {
                   )}
                 </div>
                 {(() => {
+                  const sug = catalogSuggestions[String(c.id)];
+                  if (sug && !c.cert_code) return (
+                    <div style={{ marginTop: 4 }}>
+                      <HintChip
+                        text="Codice catalog:"
+                        value={`${sug.cert_code || sug.name} (${sug.vendor})`}
+                        onApply={() => openEdit({
+                          ...c,
+                          cert_code:   sug.cert_code  || "",
+                          name:        sug.name        || c.name,
+                          issuing_org: sug.vendor      || c.issuing_org,
+                        })}
+                      />
+                    </div>
+                  );
+                  return null;
+                })()}
+                {(() => {
                   const ch = (hints.cert_hints || {})[String(c.id)];
                   if (!ch) return null;
                   return (
@@ -1297,7 +1328,30 @@ function CertificazioniTab({ token, cv, setCV, hints = {} }) {
 
           <div className="form-group">
             <label>Nome certificazione *</label>
-            <input value={form.name} onChange={e => upd("name", e.target.value)} placeholder="es. Microsoft Azure Fundamentals" />
+            <AutocompleteInput
+              value={form.name}
+              onChange={v => upd("name", v)}
+              fetchSuggestions={q => searchCertCatalog(token, q)}
+              renderSuggestion={s => (
+                <>
+                  {s.img_url && <img src={s.img_url} alt="" style={{ width: 24, height: 24, objectFit: "contain", marginRight: 6, flexShrink: 0 }} />}
+                  <span style={{ flex: 1 }}>
+                    <strong>{s.name}</strong>
+                    <em style={{ marginLeft: 6, color: "var(--color-text-muted)", fontSize: 12 }}>
+                      {s.vendor}{s.cert_code ? ` · ${s.cert_code}` : ""}
+                    </em>
+                  </span>
+                </>
+              )}
+              onSelect={s => setForm(f => ({
+                ...f,
+                name:            s.name        || f.name,
+                issuing_org:     s.vendor      || f.issuing_org,
+                cert_code:       s.cert_code   || f.cert_code,
+                badge_image_url: s.img_url     || f.badge_image_url,
+              }))}
+              placeholder="es. SAP Certified Associate..."
+            />
           </div>
 
           <div className="form-row">
