@@ -1214,11 +1214,12 @@ function CertificazioniTab({ token, cv, setCV, hints = {} }) {
                   {c.year       && <span> · {c.year}</span>}
                   {c.cert_code  && <span> · {c.cert_code}</span>}
                   {c.expiry_date && <span> · Scade: <DateStr value={c.expiry_date} /></span>}
-                  {c.doc_url && c.doc_attachment_type !== "SHAREPOINT" && (
-                    <span> · <a href={c.doc_url} target="_blank" rel="noopener noreferrer">Verifica</a></span>
-                  )}
-                  {c.doc_url && c.doc_attachment_type === "SHAREPOINT" && (
-                    <span> · <span title={c.doc_url} style={{ color: "var(--color-text-muted)" }}>Documento caricato</span></span>
+                  {c.doc_url && (
+                    <span> · <a href={c.doc_url} target="_blank" rel="noopener noreferrer">
+                      {c.doc_attachment_type === "SHAREPOINT" ? "Documento" :
+                       c.doc_attachment_type === "CREDLY"     ? "Verifica badge" :
+                                                                "Verifica"}
+                    </a></span>
                   )}
                 </div>
                 {(() => {

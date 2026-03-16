@@ -801,6 +801,7 @@ def credly_import(
         if not badge_id or not b.get("name"):
             continue
 
+        badge_url = f"https://www.credly.com/badges/{badge_id}"
         if badge_id in existing_map:
             cert = existing_map[badge_id]
             cert.name            = b.get("name", cert.name)
@@ -808,6 +809,7 @@ def credly_import(
             cert.year            = b.get("year") or cert.year
             cert.expiry_date     = b.get("expiry_date") or cert.expiry_date
             cert.badge_image_url = b.get("badge_image_url") or cert.badge_image_url
+            cert.doc_url         = badge_url
             cert.doc_attachment_type = DocAttachmentType.CREDLY
             updated += 1
         else:
@@ -819,6 +821,7 @@ def credly_import(
                 expiry_date=b.get("expiry_date") or None,
                 credly_badge_id=badge_id,
                 badge_image_url=b.get("badge_image_url") or None,
+                doc_url=badge_url,
                 doc_attachment_type=DocAttachmentType.CREDLY,
                 has_formal_cert=True,
             )
