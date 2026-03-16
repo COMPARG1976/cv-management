@@ -27,8 +27,10 @@ async def lifespan(app: FastAPI):
     ensure_schema_compatibility()
     os.makedirs(settings.upload_dir, exist_ok=True)
     with SessionLocal() as db:
-        seed_data(db)
-        seed_from_excel(db)
+        seed_data(db)           # crea admin + demo users, poi sync_all_passwords
+        seed_from_excel(db)     # crea utenti Excel con PLACEHOLDER_HASH
+        from app.seed import _sync_all_passwords
+        _sync_all_passwords(db) # ri-sincronizza TUTTI (inclusi quelli appena creati da Excel)
         populate_cert_catalog(db)
     yield
     # Shutdown (nessuna azione necessaria)

@@ -1237,16 +1237,15 @@ function CertificazioniTab({ token, cv, setCV, hints = {} }) {
                 </div>
                 {(() => {
                   const sug = catalogSuggestions[String(c.id)];
-                  if (sug && !c.cert_code) return (
+                  if (sug && sug.cert_code && !c.cert_code) return (
                     <div style={{ marginTop: 4 }}>
                       <HintChip
-                        text="Codice catalog:"
-                        value={`${sug.cert_code || sug.name} (${sug.vendor})`}
+                        text="Codice esame:"
+                        value={`${sug.cert_code} · ${sug.vendor}`}
                         onApply={() => openEdit({
                           ...c,
-                          cert_code:   sug.cert_code  || "",
-                          name:        sug.name        || c.name,
-                          issuing_org: sug.vendor      || c.issuing_org,
+                          cert_code:   sug.cert_code,
+                          issuing_org: sug.vendor || c.issuing_org,
                         })}
                       />
                     </div>
