@@ -1,8 +1,8 @@
 # CV Management System — Requisiti
 
-> Versione: 0.1 — Documento di riferimento per lo sviluppo iterativo
-> Data: 2026-03-14
-> Stato: In definizione
+> Versione: 0.4 — Documento di riferimento per lo sviluppo iterativo
+> Data: 2026-03-16
+> Stato: In evoluzione (Sprint 5 in corso)
 
 ---
 
@@ -63,6 +63,13 @@
 | FR-CV-040 | Aggiungere/modificare/eliminare certificazioni | MUST |
 | FR-CV-041 | Ogni certificazione: nome, ente, data conseguimento, data scadenza, URL badge | MUST |
 | FR-CV-042 | Alert visivo per certificazioni scadute o in scadenza (< 60 gg) | SHOULD |
+| FR-CV-043 | Campo `cert_code` (codice esame ufficiale, es. C_S4FTR_2023) | SHOULD |
+| FR-CV-044 | Campo `badge_image_url` per immagine badge Credly/Accredible | SHOULD |
+| FR-CV-045 | Campo `credly_badge_id` per collegamento diretto al badge Credly | SHOULD |
+| FR-CV-046 | Autocomplete sul campo "Nome" dalla tabella cert_catalog (fonti ufficiali) | SHOULD |
+| FR-CV-047 | Autocomplete sul campo "Codice" con suggerimento codici da cert_catalog | SHOULD |
+| FR-CV-048 | Hint chip "Codice esame: X_XXXX · Vendor" per cert senza codice se match trovato | COULD |
+| FR-CV-049 | Anteprima badge Credly con immagine, nome, emissione e scadenza | COULD |
 
 #### FR-CV-LANG — Lingue
 | ID | Requisito | Priorità |
@@ -103,6 +110,15 @@
 | FR-ADMIN-003 | Modificare ruolo utente | MUST |
 | FR-ADMIN-004 | Disattivare/riattivare utente (soft delete) | MUST |
 | FR-ADMIN-005 | Reset password utente | SHOULD |
+| FR-ADMIN-006 | UI per rigenerare/inviare password temporanee (tramite `init_passwords.py`) | COULD |
+
+#### FR-ADMIN-CATALOG — Gestione Catalogo Certificazioni
+| ID | Requisito | Priorità |
+|----|-----------|----------|
+| FR-ADMIN-CAT-001 | Visualizzare il catalogo certificazioni (SAP, OpenText, Databricks, …) | SHOULD |
+| FR-ADMIN-CAT-002 | Trigger manuale aggiornamento catalogo da fonti ufficiali (POST /cv/cert-catalog/refresh) | SHOULD |
+| FR-ADMIN-CAT-003 | Storico ultimo aggiornamento catalogo e numero entry per vendor | COULD |
+| FR-ADMIN-CAT-004 | Aggiunta manuale entry al catalogo | COULD |
 
 #### FR-ADMIN-SEARCH — Ricerca e Filtri
 | ID | Requisito | Priorità |
@@ -258,17 +274,31 @@
 - Backend: upload file, chiamata AI service, risposta strutturata
 - Frontend: wizard upload → validazione dati estratti
 
-### Sprint 4 — Admin Core (MUST)
-- Backend: API ricerca per skill, lista utenti, gestione utenti
-- Frontend: vista admin — lista utenti, ricerca, filtri skill
+### Sprint 4 — Sort + Export Prep + Hints (MUST) ✅
+- Ordinamento referenze: end_date DESC NULLS FIRST + start_date DESC (sentinella "9999-99")
+- Hint chips DB-driven: infrastruttura presente, disabilitata (riattivabile)
+- Export DOCX: `docxtpl==0.19.0` in requirements.txt, `export.py` router registrato
+- AITab + suggester.py: codice presente, non attivo
+- Password sync: `_sync_all_passwords` in lifespan per consistenza tutti gli utenti
 
-### Sprint 5 — Export & Analytics (SHOULD)
-- Backend: export Excel, dashboard skill
-- Frontend: analytics view, export buttons
+### Sprint 5 — Cert Catalog + Export DOCX (IN CORSO)
+- **Completato:**
+  - Modello `CertCatalogEntry` (tabella `cert_catalog`): `name`, `vendor`, `cert_code`, `img_url`, `credly_id`
+  - Script `_build_cert_catalog.py`: scarica SAP (113 cert), OpenText (227), Databricks (10 statici)
+  - `populate_cert_catalog()` idempotente in lifespan — 2168 entry totali nel DB
+  - `GET /cv/cert-catalog/search?q=&vendor=&limit=10` — autocomplete ILIKE
+  - `POST /cv/cert-catalog/suggest-codes` — fuzzy match (SequenceMatcher ≥ 0.80) per cert esistenti
+  - `POST /cv/cert-catalog/refresh` — re-fetch + aggiorna JSON + DB
+  - Frontend: `AutocompleteInput` su campo Nome cert (pre-carica `cert_code`, `issuing_org`, `badge_image_url`)
+  - Frontend: hint chip "Codice esame: X_XXXX · Vendor" per cert senza codice con match ≥ 0.80
+  - Credly preview arricchita con `cert_code` dal catalogo via `credly_id`
+- **In corso:**
+  - Export CV DOCX (`docxtpl`) — router presente, template da creare
+  - Admin UI per trigger refresh catalogo certificazioni
 
-### Sprint 6 — CV Completo + API Pubblica (MUST per integrazione)
+### Sprint 6 — Admin Core + API Pubblica (MUST per integrazione)
 - Backend: API pubblica `/resources/search`, `/resources/{id}`
-- Frontend: sezioni certificazioni, lingue, preview CV
+- Frontend: vista admin — lista utenti, ricerca, filtri skill, analytics
 - Documentazione API
 
 ---

@@ -1,7 +1,7 @@
 # CV Management System — Contesto Architetturale
 
 > Documento di riferimento per decisioni tecniche e pattern architetturali
-> Data: 2026-03-14
+> Data: 2026-03-16 (aggiornato Sprint 5)
 
 ---
 
@@ -121,20 +121,23 @@ User (1)──────────────────(1) CV
  │                              │     ├── years_exp
  │                              │     └── category (ENUM)
  │                              │
- │                              ├── WorkExperience (N)
- │                              │     ├── company, role
- │                              │     ├── start_date, end_date
- │                              │     ├── description
+ │                              ├── Reference (N)     ← tabella "references" (quotare in SQL raw)
+ │                              │     ├── company_name, client_name, role
+ │                              │     ├── start_date, end_date  (formato "YYYY-MM", sentinella "9999-99" per "Presente")
+ │                              │     ├── project_description, activities
  │                              │     └── skills_used (TEXT[])
  │                              │
  │                              ├── Education (N)
- │                              │     ├── institution, degree_type
+ │                              │     ├── institution, degree_level (ENUM)
  │                              │     ├── field_of_study
  │                              │     └── graduation_year, grade
  │                              │
  │                              ├── Certification (N)
  │                              │     ├── name, issuing_org
- │                              │     ├── issue_date, expiry_date
+ │                              │     ├── year (int), expiry_date
+ │                              │     ├── cert_code                ← codice esame (es. C_S4FTR_2023)
+ │                              │     ├── credly_badge_id          ← ID badge Credly (Sprint 5)
+ │                              │     ├── badge_image_url          ← URL immagine badge (Sprint 5)
  │                              │     └── credential_url
  │                              │
  │                              ├── Language (N)
@@ -154,6 +157,15 @@ SkillTaxonomy (tassonomia centralizzata)
  ├── category
  ├── aliases (TEXT[])
  └── usage_count (aggiornato da trigger/query)
+
+CertCatalogEntry (catalogo certificazioni ufficiali — Sprint 5)
+ ├── id (PK)
+ ├── name (indexed)          ← nome ufficiale del certificato
+ ├── vendor (indexed)        ← SAP | OpenText | Databricks | …
+ ├── cert_code (indexed)     ← codice esame (es. C_S4FTR_2023, DF101E)
+ ├── img_url                 ← URL immagine badge ufficiale
+ ├── credly_id               ← badge_template.id da Credly (unique)
+ └── updated_at              ← server_default now(), aggiornato ad ogni populate
 ```
 
 ### Enum Types
@@ -312,7 +324,53 @@ GET /api/v1/skills
 
 ---
 
-## 8. Migrazione/Evoluzione Prevista
+## 8. Cert Catalog — Architettura (Sprint 5)
+
+### Sorgenti dati
+| Vendor | Sorgente | Metodo | Entry |
+|--------|----------|--------|-------|
+| SAP | `learning.sap.com/service/catalog-download/json` | HTTP + filtro `Learning_object_ID` regex `^[CEP]_` | 113 (dedup per cert_code) |
+| OpenText | `opentext.com/TrainingRegistry` — lista `<option>` fornita manualmente | Parser regex `^CODE - Description` | 227 (211 con codice) |
+| Databricks | Lista statica — sito Angular SPA, Accredible API richiede auth | Hardcoded in `_build_cert_catalog.py` | 10 |
+| Credly | `api.credly.com/v1/organizations/{org_id}/badges` | HTTP JSON (precedenti sprint) | ~2000+ |
+
+**Totale DB:** ~2168 entry (Credly entries caricate da sprint precedenti + le 350 dell'import ufficiale)
+
+### File chiave
+| File | Ruolo |
+|------|-------|
+| `_build_cert_catalog.py` | Script standalone (eseguito una tantum o per aggiornamenti) — genera `backend/app/cert_catalog.json` |
+| `backend/app/cert_catalog.json` | File JSON sorgente, 62 KB, 350 entry (SAP+OpenText+Databricks) |
+| `backend/app/main.py` → `populate_cert_catalog()` | Upsert idempotente al startup: cerca per `credly_id` o `(name, vendor)` |
+| `backend/app/routers/cv.py` | Tre nuovi endpoint: `search`, `suggest-codes`, `refresh` |
+| `frontend/src/api.js` | `searchCertCatalog`, `suggestCertCodes`, `refreshCertCatalog` |
+| `frontend/src/App.jsx` | `AutocompleteInput` su Nome cert + hint chip + Credly preview arricchita |
+
+### Endpoint cert-catalog
+```
+GET  /cv/cert-catalog/search?q=sap+fiori&vendor=SAP&limit=10
+     → [{name, vendor, cert_code, img_url, credly_id}]
+     Ricerca ILIKE: exact code match → starts-with → contains
+
+POST /cv/cert-catalog/suggest-codes
+     Body: {names: {cert_id: "SAP Certified Application Associate - SAP Fiori"}}
+     → {cert_id: {cert_code, name, vendor, score}}
+     Fuzzy match (SequenceMatcher ≥ 0.80) su tutto il catalogo
+
+POST /cv/cert-catalog/refresh
+     → {added, updated, total}
+     Re-fetch SAP+OpenText+Databricks, aggiorna JSON + DB
+     (TODO: restringere a ruolo ADMIN)
+```
+
+### Frontend — UX certificazioni
+1. **Autocomplete su Nome**: mentre si digita → `GET /cv/cert-catalog/search` → dropdown con immagine + vendor + codice. On-select: pre-popola `name`, `issuing_org`, `cert_code`, `badge_image_url`.
+2. **Hint chip**: al caricamento CV, `suggestCertCodes` per tutte le cert senza `cert_code` → se match ≥ 0.80 e codice disponibile → chip blu "Codice esame: X_XXXX · SAP". Click → applica.
+3. **Credly preview**: badge enriched con `cert_code` dal catalogo tramite match `credly_id = badge_template.id`.
+
+---
+
+## 9. Migrazione/Evoluzione Prevista
 
 | Versione | Aggiunta | Note |
 |----------|----------|------|
@@ -325,7 +383,7 @@ GET /api/v1/skills
 
 ---
 
-## 9. Riferimenti
+## 10. Riferimenti
 
 - **Progetto di riferimento:** `C:\20.PROGETTI_CLAUDE_CODE\20.IT_RESOURCE_MGMT`
 - Pattern autenticazione: `20.IT_RESOURCE_MGMT/backend/app/security.py`

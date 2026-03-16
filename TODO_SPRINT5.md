@@ -5,13 +5,40 @@
 
 ---
 
+## COMPLETATO in Sprint 5
+
+### ✅ Cert Catalog — Modello e populate
+- Modello `CertCatalogEntry` (`cert_catalog`): `name`, `vendor`, `cert_code`, `img_url`, `credly_id`, `updated_at`
+- `populate_cert_catalog(db)` in lifespan — upsert idempotente su `credly_id` o `(name, vendor)`
+- Script `_build_cert_catalog.py`: SAP (113) + OpenText (227) + Databricks (10) → `cert_catalog.json`
+- DB caricato: ~2168 entry totali
+
+### ✅ Cert Catalog — API
+- `GET /cv/cert-catalog/search?q=&vendor=&limit=10` — autocomplete ILIKE con ranking
+- `POST /cv/cert-catalog/suggest-codes` — fuzzy match SequenceMatcher ≥ 0.80
+- `POST /cv/cert-catalog/refresh` — re-fetch fonti + aggiorna JSON + DB
+
+### ✅ Frontend cert UX
+- `AutocompleteInput` su campo "Nome certificazione" — dropdown con img + vendor + codice
+- On-select: pre-popola `cert_code`, `issuing_org`, `badge_image_url`
+- `useEffect` su `cv.certifications` → `suggestCertCodes` → hint chips per cert senza codice
+- Hint chip: solo se `sug.cert_code && !c.cert_code` — mostra "Codice esame: X_XXXX · Vendor"
+- Credly preview: badge arricchito con `cert_code` da catalogo via `credly_id`
+
+### ✅ Password sync
+- `_sync_all_passwords(db)` chiamato in lifespan dopo seed_data + seed_from_excel
+- Garantisce consistenza per TUTTI gli utenti (seed + Excel) ad ogni avvio
+
+---
+
 ## PRIORITA' ALTA
 
 ### 1. Export DOCX — Feature principale
 
 Implementare export CV in formato Word tramite `docxtpl` (gia' aggiunto a requirements.txt).
+Router `export.py` gia' registrato in `main.py` con prefisso `/export`.
 
-**Backend (`backend/app/routers/export.py` — da creare)**
+**Backend (`backend/app/routers/export.py`)**
 ```
 GET /export/cv/docx?template=standard
 ```
@@ -19,12 +46,6 @@ GET /export/cv/docx?template=standard
 - Carica template da `backend/app/templates/docx/cv_{template}.docx`
 - Inietta contesto con tutti i campi (vedi nomi corretti sotto)
 - Restituisce `StreamingResponse` con `Content-Disposition: attachment`
-
-**Registrazione in `main.py`**
-```python
-from app.routers import export
-app.include_router(export.router, prefix="/export", tags=["export"])
-```
 
 **Template Jinja (`backend/app/templates/docx/cv_standard.docx`)**
 - Da generare con `gen_template.py` (script in `backend/app/templates/docx/`)
@@ -90,25 +111,28 @@ export async function exportCVDocx(token, template = "standard") {
 
 ---
 
-### 2. Fix login luca.fidenti
-
-Password resettata a `Demo123!` via docker exec. Verificare che funzioni dal frontend.
-Se ancora KO: controllare hash nel DB con:
-```bash
-docker exec cv_db psql -U cv_user -d cv_management \
-  -c "SELECT email, password_hash FROM users WHERE email='luca.fidenti@mashfrog.com';"
-```
-e rigenerare hash con:
-```bash
-docker exec cv_backend python -c \
-  "from app.security import hash_password; print(hash_password('Demo123!'))"
-```
-
----
-
 ## PRIORITA' MEDIA
 
-### 3. Pulizia codice hints (opzionale)
+### 2. Admin UI — Trigger refresh catalogo certificazioni
+
+Endpoint `POST /cv/cert-catalog/refresh` esiste ma:
+- Accessibile a qualsiasi utente autenticato (nessun check ruolo)
+- Nessuna UI nel pannello admin
+
+**Azioni:**
+1. Aggiungere guard `require_roles(UserRole.ADMIN)` sull'endpoint `/refresh`
+2. Aggiungere pulsante "Aggiorna Catalogo Certificazioni" nel pannello Admin
+3. Mostrare: ultimo aggiornamento, numero entry per vendor
+
+### 3. Admin UI — Reset password utente
+
+`FR-ADMIN-005` e `FR-ADMIN-006` — attualmente nessuna UI admin per reset password.
+
+Opzioni:
+- Pulsante "Reset Password" nella lista utenti admin → genera temp password → mostra a schermo
+- Oppure: integrazione con `scripts/init_passwords.py` per export Excel
+
+### 4. Pulizia codice hints (opzionale)
 
 Il codice hints e' **disabilitato ma presente**. Decidere se:
 - Tenerlo commentato (riattivabile in futuro)
@@ -121,7 +145,7 @@ File coinvolti:
 - `ai-services/app/suggester.py`: file non usato (era per AI suggestions)
 - `ai-services/app/main.py`: `POST /suggest` endpoint non usato
 
-### 4. Fix record orfano esperienze
+### 5. Fix record orfano esperienze
 
 Verificare/eliminare record `id=15` (company Mashfrog, `cv_id=11`) che risultava orfano.
 ```bash
@@ -129,11 +153,11 @@ docker exec cv_db psql -U cv_user -d cv_management \
   -c "SELECT id, cv_id, company_name, role FROM \"references\" WHERE id=15;"
 ```
 
-### 5. Tab Esperienze — verifica filtri frontend
+### 6. Tab Esperienze — verifica filtri frontend
 
 Controllare che il tab Esperienze mostri TUTTI i record del DB senza filtri nascosti in App.jsx.
 
-### 6. UX Diff wizard Step 3
+### 7. UX Diff wizard Step 3
 
 Badge `db_only` nelle esperienze: aggiungere testo esplicativo
 "Gia' presente nel tuo profilo — gestiscilo dalla tab Esperienze"
@@ -146,4 +170,6 @@ Badge `db_only` nelle esperienze: aggiungere testo esplicativo
 - Template DOCX va incluso nel Docker image (Dockerfile copia `app/` → `app/templates/` inclusa)
 - docxtpl usa python-docx internamente; non e' necessario installare python-docx separatamente
 - Per blocchi multi-paragrafo: usare `{%p for %}` / `{%p endfor %}` (non `{%tr %}` che e' per tabelle)
-- Stop hook Claude Code: ancora irrisolto — richiede `preview_start` ma porta 8082 occupata da Docker
+- `cert_catalog.json` (62 KB) e' incluso nel Docker image tramite COPY in Dockerfile
+- `_build_cert_catalog.py` va eseguito localmente con `python _build_cert_catalog.py` per aggiornare il JSON prima del rebuild
+- Aggiungere `passwords_*.xlsx` a `.gitignore` prima di generare password PRD
