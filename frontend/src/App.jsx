@@ -11,7 +11,7 @@ import {
   addReference, updateReference, deleteReference,
   addCertification, updateCertification, deleteCertification,
   getSkillSuggestions, getCertSuggestions,
-  uploadCV, applyDiff,
+  uploadCV, applyDiff, getCVHints,
 } from "./api.js";
 
 // ── Costanti ──────────────────────────────────────────────────────────────────
@@ -249,20 +249,22 @@ function HomeView({ currentUser, setView }) {
 // ── My CV View ────────────────────────────────────────────────────────────────
 function MyCVView({ token, currentUser, onBack }) {
   const [cv, setCV]               = useState(null);
+  const [hints, setHints]         = useState({});
   const [loading, setLoading]     = useState(true);
   const [error, setError]         = useState("");
   const [activeTab, setActiveTab] = useState("anagrafica");
 
   useEffect(() => {
+    // HINTS DISABILITATI — per riattivare: .then(data => { setCV(data); return getCVHints(token); }).then(h => setHints(h))
     getMyCV(token)
-      .then(setCV)
+      .then(data => setCV(data))
       .catch(err => setError(err.message))
       .finally(() => setLoading(false));
   }, [token]);
 
   if (loading) return <div className="loading-center"><div className="spinner" /></div>;
 
-  const tabProps = { token, cv, setCV };
+  const tabProps = { token, cv, setCV, hints };
 
   return (
     <>
@@ -324,7 +326,7 @@ function MyCVView({ token, currentUser, onBack }) {
 }
 
 // ── Anagrafica Tab ────────────────────────────────────────────────────────────
-function AnagraficaTab({ token, cv, setCV }) {
+function AnagraficaTab({ token, cv, setCV, hints = {} }) {
   const [showModal, setShowModal] = useState(false);
   const [saving, setSaving]       = useState(false);
   const [error, setError]         = useState("");
@@ -381,6 +383,14 @@ function AnagraficaTab({ token, cv, setCV }) {
           <span className="card__title">Dati Personali</span>
           <button className="btn btn-primary btn-sm" onClick={openModal}>✏ Modifica</button>
         </div>
+        {/* Hint profilo: campi mancanti */}
+        {(hints.profile_hints || []).length > 0 && (
+          <div style={{ display: "flex", flexWrap: "wrap", gap: 6, marginBottom: 12 }}>
+            {hints.profile_hints.map(h => (
+              <HintChip key={h.field} text={h.label} onApply={openModal} />
+            ))}
+          </div>
+        )}
         <dl style={{ display: "grid", gridTemplateColumns: "220px 1fr", rowGap: 12, fontSize: 13 }}>
           <dt style={dt}>Titolo / Ruolo</dt>
           <dd>{cv.title || "—"}</dd>
@@ -498,7 +508,7 @@ function AnagraficaTab({ token, cv, setCV }) {
 }
 
 // ── Competenze Tab ────────────────────────────────────────────────────────────
-function CompetenzeTab({ token, cv, setCV }) {
+function CompetenzeTab({ token, cv, setCV, hints = {} }) {
   const [modal, setModal]   = useState(null); // null | { mode:"add"|"edit", item? }
   const [saving, setSaving] = useState(false);
   const [error, setError]   = useState("");
@@ -554,6 +564,26 @@ function CompetenzeTab({ token, cv, setCV }) {
   return (
     <>
       {error && !modal && <div className="alert alert--error">{error}</div>}
+
+      {/* Skill suggerite dalle esperienze */}
+      {(hints.skill_hints || []).length > 0 && (
+        <div style={{ background: "#fffbeb", border: "1px solid #fde68a", borderRadius: 8, padding: "12px 16px", marginBottom: 16 }}>
+          <div style={{ fontSize: 13, fontWeight: 600, color: "#92400e", marginBottom: 8 }}>
+            💡 Competenze rilevate dalle tue esperienze non ancora nel profilo:
+          </div>
+          <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
+            {hints.skill_hints.map(sk => (
+              <button
+                key={sk}
+                onClick={() => { setForm({ skill_name: sk, category: "HARD", rating: 3, notes: "" }); setModal({ mode: "add" }); }}
+                style={{ background: "#f59e0b", color: "#fff", border: "none", borderRadius: 6, padding: "3px 12px", fontSize: 12, fontWeight: 600, cursor: "pointer" }}
+              >
+                + {sk}
+              </button>
+            ))}
+          </div>
+        </div>
+      )}
 
       {[{ cat: "HARD", label: "Competenze Tecniche", items: hard },
         { cat: "SOFT", label: "Soft Skills",         items: soft }].map(({ cat, label, items }) => (
@@ -636,7 +666,7 @@ function CompetenzeTab({ token, cv, setCV }) {
 }
 
 // ── Esperienze Tab ────────────────────────────────────────────────────────────
-function EsperienzeTab({ token, cv, setCV }) {
+function EsperienzeTab({ token, cv, setCV, hints = {} }) {
   const [modal, setModal]   = useState(null);
   const [saving, setSaving] = useState(false);
   const [error, setError]   = useState("");
@@ -702,9 +732,14 @@ function EsperienzeTab({ token, cv, setCV }) {
   }
 
   const refs = [...(cv.references || [])].sort((a, b) => {
-    const da = a.end_date || a.start_date || "";
-    const db = b.end_date || b.start_date || "";
-    return db.localeCompare(da);
+    // "In corso" (end_date null) → considera come futuro lontano per venire prima
+    const endA = a.end_date || "9999-99";
+    const endB = b.end_date || "9999-99";
+    if (endB !== endA) return endB.localeCompare(endA);
+    // parità su end_date: ordina per start_date DESC
+    const startA = a.start_date || "";
+    const startB = b.start_date || "";
+    return startB.localeCompare(startA);
   });
 
   const RefForm = () => (
@@ -783,6 +818,20 @@ function EsperienzeTab({ token, cv, setCV }) {
                     {r.project_description}
                   </div>
                 )}
+                {/* Hint inline per campi mancanti */}
+                {(() => {
+                  const eh = (hints.experience_hints || {})[String(r.id)];
+                  if (!eh) return null;
+                  return (
+                    <div style={{ display: "flex", flexWrap: "wrap", gap: 6, marginTop: 4 }}>
+                      {eh.project_description && <HintChip text={eh.project_description.note} onApply={() => openEdit(r)} />}
+                      {eh.role               && <HintChip text={eh.role.note} onApply={() => openEdit(r)} />}
+                      {eh.client_name        && <HintChip text={eh.client_name.note} onApply={() => openEdit(r)} />}
+                      {eh.skills_acquired    && <HintChip text={eh.skills_acquired.note} onApply={() => openEdit(r)} />}
+                      {eh.start_date         && <HintChip text={eh.start_date.note} onApply={() => openEdit(r)} />}
+                    </div>
+                  );
+                })()}
               </div>
               <div className="section-item__actions">
                 <button className="btn btn-secondary btn-sm" onClick={() => openEdit(r)}>✏</button>
@@ -954,7 +1003,7 @@ function FormazioneTab({ token, cv, setCV }) {
 }
 
 // ── Certificazioni Tab ────────────────────────────────────────────────────────
-function CertificazioniTab({ token, cv, setCV }) {
+function CertificazioniTab({ token, cv, setCV, hints = {} }) {
   const [modal, setModal]   = useState(null);
   const [saving, setSaving] = useState(false);
   const [error, setError]   = useState("");
@@ -1056,6 +1105,38 @@ function CertificazioniTab({ token, cv, setCV }) {
                   {c.expiry_date && <span> · Scade: <DateStr value={c.expiry_date} /></span>}
                   {c.doc_url    && <span> · <a href={c.doc_url} target="_blank" rel="noopener noreferrer">🔗 Verifica</a></span>}
                 </div>
+                {/* Hint inline per ogni campo mancante */}
+                {(() => {
+                  const ch = (hints.cert_hints || {})[String(c.id)];
+                  if (!ch) return null;
+                  return (
+                    <div style={{ display: "flex", flexWrap: "wrap", gap: 6, marginTop: 4 }}>
+                      {ch.cert_code && (
+                        <HintChip
+                          text="Codice cert. suggerito:"
+                          value={`${ch.cert_code.value} (da ${ch.cert_code.count} CV)`}
+                          onApply={() => openEdit({ ...c, cert_code: ch.cert_code.value })}
+                        />
+                      )}
+                      {ch.issuing_org && (
+                        <HintChip
+                          text="Ente emittente suggerito:"
+                          value={ch.issuing_org.value}
+                          onApply={() => openEdit({ ...c, issuing_org: ch.issuing_org.value })}
+                        />
+                      )}
+                      {ch.doc_url && (
+                        <HintChip
+                          text="URL verifica trovato in altri CV"
+                          onApply={() => openEdit({ ...c, doc_url: ch.doc_url.value, doc_attachment_type: ch.doc_url.attachment_type || "URL" })}
+                        />
+                      )}
+                      {ch.expiry_date && (
+                        <HintChip text={ch.expiry_date.note} />
+                      )}
+                    </div>
+                  );
+                })()}
               </div>
               <div className="section-item__actions">
                 <button className="btn btn-secondary btn-sm" onClick={() => openEdit(c)}>✏</button>
@@ -1532,6 +1613,14 @@ function ProfileSection({ diff, selections, setSelections }) {
   );
 }
 
+const TAB_LABELS = {
+  skills: "Competenze",
+  references: "Esperienze",
+  educations: "Formazione",
+  certifications: "Certificazioni",
+  languages: "Lingue",
+};
+
 function ItemsSection({ icon, title, sectionKey, diff, selections, setSelections }) {
   const sec   = diff[sectionKey] || {};
   const items = sec.items || [];
@@ -1683,16 +1772,21 @@ function ItemsSection({ icon, title, sectionKey, diff, selections, setSelections
       {dbOnlyItems.length > 0 && (
         <div style={{marginTop:8}}>
           <button className="btn btn-sm btn-secondary" onClick={() => setShowDbOnly(p=>!p)}>
-            {showDbOnly ? "Nascondi" : "Mostra"} {dbOnlyItems.length} presenti nel profilo, non trovati nel CV
+            {showDbOnly ? "Nascondi" : "Mostra"} {dbOnlyItems.length} {dbOnlyItems.length === 1 ? "voce presente" : "voci presenti"} nel profilo, non {dbOnlyItems.length === 1 ? "trovata" : "trovate"} nel CV
           </button>
           {showDbOnly && (
-            <div style={{marginTop:8,padding:"10px 12px",background:"#f1f5f9",borderRadius:6,fontSize:13}}>
-              <p style={{marginBottom:8,color:"var(--color-text-muted)"}}>
-                Queste voci rimangono nel profilo. Per rimuoverle usa le tab dedicate.
+            <div style={{marginTop:8,padding:"10px 14px",background:"#fefce8",border:"1px solid #fde047",borderRadius:6,fontSize:13}}>
+              <p style={{marginBottom:10,color:"#854d0e",fontWeight:500}}>
+                Queste voci sono presenti nel profilo ma non sono state trovate nel CV caricato.
+                Rimangono invariate — per modificarle o eliminarle usa la tab <strong>{TAB_LABELS[sectionKey] || title}</strong>.
               </p>
               {dbOnlyItems.map((item, i) => (
-                <div key={i} style={{display:"flex",alignItems:"center",gap:8,padding:"4px 0"}}>
-                  <StatusBadge status="db_only" /><span>{getSummary(item)}</span>
+                <div key={i} style={{display:"flex",alignItems:"center",gap:8,padding:"6px 10px",marginBottom:4,background:"#fff",borderRadius:4,border:"1px solid #fde047"}}>
+                  <StatusBadge status="db_only" />
+                  <span style={{fontWeight:500}}>{getSummary(item)}</span>
+                  <span style={{fontSize:11,color:"#92400e",fontStyle:"italic",marginLeft:"auto"}}>
+                    non trovato nel CV — gestiscilo dalla tab {TAB_LABELS[sectionKey] || title}
+                  </span>
                 </div>
               ))}
             </div>
@@ -1863,6 +1957,180 @@ function UploadTab({ token, cv, setCV }) {
     </div>
   );
 }
+// ── HintChip — suggerimento inline contestuale ────────────────────────────────
+function HintChip({ text, value, onApply }) {
+  return (
+    <div style={{
+      display: "inline-flex", alignItems: "center", gap: 6,
+      background: "#fffbeb", border: "1px solid #fde68a",
+      borderRadius: 6, padding: "3px 8px", fontSize: 12,
+      color: "#92400e", marginTop: 4,
+    }}>
+      <span>💡</span>
+      <span>{text}{value ? <strong> {value}</strong> : null}</span>
+      {onApply && (
+        <button
+          onClick={onApply}
+          style={{
+            marginLeft: 4, background: "#f59e0b", color: "#fff",
+            border: "none", borderRadius: 4, padding: "1px 7px",
+            fontSize: 11, cursor: "pointer", fontWeight: 600,
+          }}
+        >
+          Usa
+        </button>
+      )}
+    </div>
+  );
+}
+
+// ── AI Suggerimenti Tab ────────────────────────────────────────────────────────
+const SECTION_LABELS = {
+  profile:        "Profilo",
+  skills:         "Competenze",
+  experiences:    "Esperienze",
+  certifications: "Certificazioni",
+  educations:     "Formazione",
+  languages:      "Lingue",
+};
+
+const PRIORITY_STYLE = {
+  HIGH:   { bg: "#fef2f2", border: "#fca5a5", badge: "#dc2626", label: "Alta" },
+  MEDIUM: { bg: "#fffbeb", border: "#fde68a", badge: "#d97706", label: "Media" },
+  LOW:    { bg: "#f0fdf4", border: "#86efac", badge: "#16a34a", label: "Bassa" },
+};
+
+function ScoreGauge({ score }) {
+  const color = score >= 75 ? "#16a34a" : score >= 50 ? "#d97706" : "#dc2626";
+  return (
+    <div style={{ textAlign: "center", marginBottom: 24 }}>
+      <div style={{ fontSize: 56, fontWeight: 800, color }}>{Math.round(score)}</div>
+      <div style={{ fontSize: 13, color: "var(--color-text-muted)", marginBottom: 8 }}>/ 100 — Qualità CV</div>
+      <div style={{ background: "var(--color-border)", borderRadius: 8, height: 10, maxWidth: 300, margin: "0 auto" }}>
+        <div style={{ height: 10, borderRadius: 8, background: color, width: `${score}%`, transition: "width .5s" }} />
+      </div>
+    </div>
+  );
+}
+
+function SuggestionCard({ s }) {
+  const ps = PRIORITY_STYLE[s.priority] || PRIORITY_STYLE.LOW;
+  return (
+    <div style={{ border: `1px solid ${ps.border}`, borderRadius: 8, padding: "14px 16px", marginBottom: 10, background: ps.bg }}>
+      <div style={{ display: "flex", alignItems: "flex-start", gap: 10, marginBottom: 6 }}>
+        <span style={{ background: ps.badge, color: "#fff", fontSize: 11, fontWeight: 700, padding: "2px 8px", borderRadius: 10, whiteSpace: "nowrap", marginTop: 2 }}>
+          {ps.label}
+        </span>
+        <span style={{ fontWeight: 600, fontSize: 14 }}>{s.title}</span>
+      </div>
+      <p style={{ fontSize: 13, color: "var(--color-text-muted)", margin: 0 }}>{s.description}</p>
+      {s.item_ref && (
+        <div style={{ marginTop: 6, fontSize: 12, color: "#6b7280" }}>Riferimento: <em>{s.item_ref}</em></div>
+      )}
+    </div>
+  );
+}
+
+function AITab({ token }) {
+  const [status, setStatus]         = useState("idle"); // idle | loading | done | error
+  const [result, setResult]         = useState(null);
+  const [errorMsg, setErrorMsg]     = useState("");
+  const [activeSection, setSection] = useState("all");
+
+  async function runAnalysis() {
+    setStatus("loading");
+    setErrorMsg("");
+    try {
+      const data = await getCVSuggestions(token);
+      if (data.status === "error") throw new Error(data.error || "Errore AI");
+      setResult(data);
+      setStatus("done");
+    } catch (e) {
+      setErrorMsg(e.message);
+      setStatus("error");
+    }
+  }
+
+  const suggestions = result?.suggestions || [];
+  const sections = ["all", ...new Set(suggestions.map(s => s.section))];
+  const filtered = activeSection === "all" ? suggestions : suggestions.filter(s => s.section === activeSection);
+  const sorted   = [...filtered].sort((a, b) => {
+    const order = { HIGH: 0, MEDIUM: 1, LOW: 2 };
+    return (order[a.priority] ?? 3) - (order[b.priority] ?? 3);
+  });
+
+  return (
+    <div className="card">
+      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 8 }}>
+        <h3 style={{ margin: 0 }}>Analisi AI del CV</h3>
+        <button
+          className="btn btn-primary"
+          onClick={runAnalysis}
+          disabled={status === "loading"}
+        >
+          {status === "loading" ? "Analisi in corso…" : status === "done" ? "Rianalizza" : "Analizza CV"}
+        </button>
+      </div>
+
+      {status === "idle" && (
+        <p style={{ color: "var(--color-text-muted)", marginTop: 16 }}>
+          Clicca <strong>Analizza CV</strong> per ricevere suggerimenti personalizzati da AI su come migliorare il tuo profilo.
+        </p>
+      )}
+
+      {status === "loading" && (
+        <div style={{ textAlign: "center", padding: "40px 0", color: "var(--color-text-muted)" }}>
+          <div style={{ fontSize: 32, marginBottom: 12 }}>🤖</div>
+          <p>Analisi in corso, attendi circa 15-30 secondi…</p>
+        </div>
+      )}
+
+      {status === "error" && (
+        <div className="alert alert--error" style={{ marginTop: 16 }}>{errorMsg}</div>
+      )}
+
+      {status === "done" && result && (
+        <>
+          <ScoreGauge score={result.overall_score ?? 0} />
+
+          {result.summary && (
+            <div style={{ background: "#f8fafc", borderRadius: 8, padding: "12px 16px", marginBottom: 20, fontSize: 14, color: "#374151", borderLeft: "4px solid var(--color-primary)" }}>
+              {result.summary}
+            </div>
+          )}
+
+          {suggestions.length === 0 ? (
+            <div style={{ textAlign: "center", padding: "24px 0", color: "var(--color-text-muted)" }}>
+              Nessun suggerimento — CV ottimo!
+            </div>
+          ) : (
+            <>
+              <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginBottom: 16 }}>
+                {sections.map(sec => (
+                  <button
+                    key={sec}
+                    onClick={() => setSection(sec)}
+                    style={{
+                      padding: "4px 12px", borderRadius: 20, fontSize: 13, cursor: "pointer", border: "1px solid var(--color-border)",
+                      background: activeSection === sec ? "var(--color-primary)" : "#fff",
+                      color: activeSection === sec ? "#fff" : "var(--color-text)",
+                      fontWeight: activeSection === sec ? 700 : 400,
+                    }}
+                  >
+                    {sec === "all" ? `Tutti (${suggestions.length})` : `${SECTION_LABELS[sec] || sec} (${suggestions.filter(s => s.section === sec).length})`}
+                  </button>
+                ))}
+              </div>
+
+              {sorted.map((s, i) => <SuggestionCard key={i} s={s} />)}
+            </>
+          )}
+        </>
+      )}
+    </div>
+  );
+}
+
 // ── Placeholder View ──────────────────────────────────────────────────────────
 function PlaceholderView({ title, onBack, sprint }) {
   return (

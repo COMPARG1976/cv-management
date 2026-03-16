@@ -118,6 +118,29 @@ def _map_category(category: Optional[str]) -> str:
     return "SOFT"
 
 
+# ── Ref sort key ──────────────────────────────────────────────────────────────
+
+def _ref_date_val(date_str, is_current: bool = False) -> int:
+    """Converte una data in un intero YYYYMM per ordinamento DESC.
+    Posizione corrente (is_current=True o end_date assente) → valore massimo."""
+    if is_current or not date_str:
+        return 999999
+    d = _parse_date(str(date_str))
+    return (d.year * 100 + d.month) if d else 0
+
+
+def _ref_sort_key(item: dict) -> tuple:
+    """Chiave di ordinamento: end_date DESC, start_date DESC.
+    Posizioni correnti (end_date None) compaiono per prime."""
+    if item.get("status") in ("changed", "unchanged", "db_only"):
+        data = item.get("db_data", {})
+    else:  # new
+        data = item.get("ai_data", {})
+    end_val   = _ref_date_val(data.get("end_date"),   data.get("is_current", False))
+    start_val = _ref_date_val(data.get("start_date"), False)
+    return (-end_val, -start_val)
+
+
 # ── Diff computation ──────────────────────────────────────────────────────────
 
 def compute_diff(cv: CV, ai: dict) -> dict:
@@ -201,6 +224,8 @@ def compute_diff(cv: CV, ai: dict) -> dict:
     for ai_exp in ai_exps:
         best_ref, best_score = None, 0.0
         for ref in db_refs:
+            if ref.id in matched_ref:
+                continue  # già abbinata a un'altra AI exp → non riusare (matching 1:1)
             c = _sim(ref.company_name or "", ai_exp.get("company", ""))
             r = _sim(ref.role or "",         ai_exp.get("role", ""))
             score = c * 0.5 + r * 0.3
@@ -261,8 +286,13 @@ def compute_diff(cv: CV, ai: dict) -> dict:
             refs_items.append({
                 "status": "db_only", "db_id": ref.id,
                 "db_data": {"company_name": ref.company_name, "role": ref.role,
-                            "start_date": str(ref.start_date) if ref.start_date else None},
+                            "start_date": str(ref.start_date) if ref.start_date else None,
+                            "end_date":   str(ref.end_date)   if ref.end_date   else None,
+                            "is_current": ref.is_current},
             })
+
+    # Ordina dalla più recente alla più vecchia (end_date DESC, start_date DESC)
+    refs_items.sort(key=_ref_sort_key)
 
     # ── Formazione ──
     db_edus  = list(cv.educations or [])

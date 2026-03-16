@@ -39,6 +39,18 @@ class ParseResponse(BaseModel):
     error: str | None = None
 
 
+class SuggestRequest(BaseModel):
+    cv_data: dict           # dati strutturati del CV (da DB)
+
+
+class SuggestResponse(BaseModel):
+    status: str             # "ok" | "error"
+    overall_score: float | None = None
+    summary: str | None = None
+    suggestions: list | None = None
+    error: str | None = None
+
+
 # ── Health ────────────────────────────────────────────────────────────────────
 
 @app.get("/health", tags=["system"])
@@ -78,3 +90,27 @@ async def parse_cv(req: ParseRequest):
 
     except Exception as e:
         return ParseResponse(document_id=req.document_id, status="error", error=str(e))
+
+
+# ── Suggest endpoint ──────────────────────────────────────────────────────────
+
+@app.post("/suggest", response_model=SuggestResponse, tags=["suggestions"])
+async def suggest_cv(req: SuggestRequest):
+    """
+    Riceve i dati strutturati di un CV (da DB) e restituisce
+    suggerimenti di miglioramento generati da OpenAI.
+    """
+    if not settings.openai_api_key:
+        raise HTTPException(status_code=503, detail="OpenAI API key non configurata")
+
+    try:
+        from app.suggester import suggest_improvements
+        result = await suggest_improvements(req.cv_data, settings.openai_api_key, settings.openai_model)
+        return SuggestResponse(
+            status="ok",
+            overall_score=result.get("overall_score"),
+            summary=result.get("summary"),
+            suggestions=result.get("suggestions", []),
+        )
+    except Exception as e:
+        return SuggestResponse(status="error", error=str(e))

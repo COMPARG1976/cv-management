@@ -2,8 +2,9 @@
 Router /cv — Sprint 2+.
 GET/PUT /cv/me + CRUD sub-risorse + suggest endpoints + completeness dinamico.
 """
-from typing import List
+from typing import List, Any
 
+import httpx
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy import func
 from sqlalchemy.orm import Session, selectinload
@@ -33,6 +34,13 @@ _USER_FIELDS = {"hire_date_mashfrog", "mashfrog_office", "bu_mashfrog"}
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
+def _sort_refs_key(ref: Reference):
+    """Chiave sort: end_date DESC NULLS FIRST (posizioni correnti/null → prima), poi start_date DESC."""
+    end_val = 999999 if (ref.is_current or ref.end_date is None) else (ref.end_date.year * 100 + ref.end_date.month)
+    start_val = (ref.start_date.year * 100 + ref.start_date.month) if ref.start_date else 0
+    return (-end_val, -start_val)
+
+
 def _load_cv(user_id: int, db: Session) -> CV:
     """Carica CV con tutte le relazioni (crea se non esiste)."""
     cv = (
@@ -54,6 +62,8 @@ def _load_cv(user_id: int, db: Session) -> CV:
         db.add(cv)
         db.commit()
         return _load_cv(user_id, db)
+    if cv.references:
+        cv.references.sort(key=_sort_refs_key)
     return cv
 
 
@@ -167,6 +177,120 @@ def suggest_certifications(
         )
         for r in rows
     ]
+
+
+# ── CV Hints (DB-driven, no AI) ───────────────────────────────────────────────
+
+@router.get("/me/hints")
+def get_my_cv_hints(
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """
+    Suggerimenti contestuali basati sui dati del DB (no AI).
+    - cert_hints: per ogni cert senza codice, suggerisce il codice più comune da CV simili
+    - skill_hints: skill presenti in skills_acquired delle esperienze ma non nel profilo
+    - experience_hints: esperienze senza descrizione o con descrizione molto breve
+    - profile_hints: campi profilo mancanti importanti
+    """
+    cv = _load_cv(current_user.id, db)
+
+    hints: dict[str, Any] = {
+        "cert_hints": {},
+        "skill_hints": [],
+        "experience_hints": {},
+        "profile_hints": [],
+    }
+
+    # 1. Cert hints: per ogni cert, suggerisce i campi mancanti da certs simili nel DB
+    for cert in (cv.certifications or []):
+        name_prefix = cert.name[:25] if len(cert.name) > 25 else cert.name
+        # Trova le certs più simili negli altri CV
+        similar = (
+            db.query(Certification)
+            .filter(
+                Certification.cv_id != cv.id,
+                Certification.name.ilike(f"%{name_prefix}%"),
+            )
+            .all()
+        )
+        if not similar:
+            continue
+        cert_hint: dict[str, Any] = {}
+
+        # cert_code
+        if not cert.cert_code:
+            codes = [(c.cert_code, c) for c in similar if c.cert_code]
+            if codes:
+                # codice più frequente
+                from collections import Counter
+                most_common = Counter(c for c, _ in codes).most_common(1)[0]
+                best = next(c for code, c in codes if code == most_common[0])
+                cert_hint["cert_code"] = {"value": best.cert_code, "count": most_common[1]}
+
+        # issuing_org
+        if not cert.issuing_org:
+            orgs = [c.issuing_org for c in similar if c.issuing_org]
+            if orgs:
+                cert_hint["issuing_org"] = {"value": Counter(orgs).most_common(1)[0][0]}
+
+        # doc_url / verifica
+        if not cert.doc_url:
+            urls = [(c.doc_url, c.doc_attachment_type) for c in similar if c.doc_url]
+            if urls:
+                cert_hint["doc_url"] = {"value": urls[0][0], "attachment_type": urls[0][1].value if urls[0][1] else None}
+
+        # expiry_date
+        if not cert.expiry_date:
+            expiries = [c.expiry_date for c in similar if c.expiry_date]
+            if expiries:
+                cert_hint["expiry_date"] = {"note": "Altri CV hanno una data di scadenza per questa certificazione"}
+
+        if cert_hint:
+            hints["cert_hints"][str(cert.id)] = cert_hint
+
+    # 2. Skill hints: skill presenti in skills_acquired ma non nel profilo competenze
+    existing = {s.skill_name.lower() for s in (cv.skills or [])}
+    found: list[str] = []
+    for ref in (cv.references or []):
+        for sk in (ref.skills_acquired or []):
+            if sk and sk.lower() not in existing and sk not in found:
+                found.append(sk)
+    hints["skill_hints"] = found[:12]
+
+    # 3. Experience field hints: segnala campo per campo cosa manca
+    for ref in (cv.references or []):
+        exp_hint: dict[str, Any] = {}
+        desc = (ref.project_description or "").strip()
+        acts = (ref.activities or "").strip()
+        if not desc and not acts:
+            exp_hint["project_description"] = {"note": "Descrizione progetto assente"}
+        elif len(desc) < 80 and len(acts) < 80:
+            exp_hint["project_description"] = {"note": "Descrizione molto breve (< 80 caratteri)"}
+        if not ref.role:
+            exp_hint["role"] = {"note": "Ruolo non specificato"}
+        if not ref.client_name:
+            exp_hint["client_name"] = {"note": "Cliente finale non specificato"}
+        if not ref.skills_acquired or len(ref.skills_acquired) == 0:
+            exp_hint["skills_acquired"] = {"note": "Nessuna competenza acquisita indicata"}
+        if not ref.start_date:
+            exp_hint["start_date"] = {"note": "Data inizio assente"}
+        if exp_hint:
+            hints["experience_hints"][str(ref.id)] = exp_hint
+
+    # 4. Profile hints: campi importanti mancanti
+    if not cv.title:
+        hints["profile_hints"].append({"field": "title", "label": "Titolo professionale mancante"})
+    if not cv.summary or len(cv.summary.strip()) < 80:
+        hints["profile_hints"].append({"field": "summary", "label": "Summary assente o troppo breve"})
+    if not cv.phone:
+        hints["profile_hints"].append({"field": "phone", "label": "Telefono mancante"})
+    if not cv.linkedin_url:
+        hints["profile_hints"].append({"field": "linkedin_url", "label": "LinkedIn mancante"})
+    if not cv.residence_city:
+        hints["profile_hints"].append({"field": "residence_city", "label": "Città di residenza mancante"})
+
+    return hints
 
 
 # ── GET / PUT /cv/me ──────────────────────────────────────────────────────────

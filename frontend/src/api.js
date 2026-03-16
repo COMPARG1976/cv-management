@@ -212,6 +212,12 @@ export async function applyDiff(token, payload) {
   return apiFetch("/upload/apply", { method: "POST", body: JSON.stringify(payload) }, token);
 }
 
+// ── CV Hints (DB-driven) ──────────────────────────────────────────────────────
+
+export async function getCVHints(token) {
+  return apiFetch("/cv/me/hints", {}, token);
+}
+
 // ── Export ────────────────────────────────────────────────────────────────────
 
 export async function exportSearchExcel(token, params = {}) {
