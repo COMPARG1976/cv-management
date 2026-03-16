@@ -16,9 +16,11 @@ router = APIRouter()
 
 @router.post("/login", response_model=TokenResponse)
 def login(form_data: OAuth2PasswordRequestForm = Depends(), db: Session = Depends(get_db)):
+    login_id = form_data.username.lower()
     user = db.query(User).filter(
-        User.email == form_data.username.lower(),
         User.is_active == True,
+    ).filter(
+        (User.email == login_id) | (User.username == login_id)
     ).first()
 
     if not user or not verify_password(form_data.password, user.hashed_password):

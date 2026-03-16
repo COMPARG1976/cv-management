@@ -1487,6 +1487,11 @@ function CertificazioniTab({ token, cv, setCV, hints = {} }) {
                       <div style={{ flex: 1, minWidth: 0 }}>
                         <div style={{ fontWeight: 500, fontSize: 13, display: "flex", alignItems: "center", gap: 6 }}>
                           {b.name}
+                          {b.cert_code && (
+                            <span style={{ fontSize: 10, background: "#e3f2fd", color: "#1565c0", borderRadius: 4, padding: "1px 5px", fontWeight: 600 }}>
+                              {b.cert_code}
+                            </span>
+                          )}
                           {isExpired && (
                             <span style={{ fontSize: 10, background: "#ffebee", color: "#c62828", borderRadius: 4, padding: "1px 5px", fontWeight: 600 }}>
                               Scaduta

@@ -16,13 +16,11 @@ from app.models import (
     Certification, SkillCategory, DegreeLevel, LanguageLevel,
     DocAttachmentType, UserRole, AvailabilityStatus,
 )
-from app.security import hash_password
-
 logger = logging.getLogger(__name__)
 
 EXCEL_PATH = Path("/app/data/people_analytics.xlsx")
-DEFAULT_PASSWORD = "Welcome23!"
 EMAIL_DOMAIN = "mashfrog.com"
+_PLACEHOLDER_HASH = "SEED_PLACEHOLDER"  # sovrascritto da _sync_all_passwords in seed.py
 
 
 # ── Date / year helpers ───────────────────────────────────────────────────────
@@ -291,7 +289,7 @@ def seed_from_excel(db: Session, excel_path: Path = EXCEL_PATH) -> None:
             email=email,
             username=username,
             full_name=username_to_fullname(username),
-            hashed_password=hash_password(DEFAULT_PASSWORD),
+            hashed_password=_PLACEHOLDER_HASH,  # password vera impostata da _sync_all_passwords
             role=UserRole.USER,
             is_active=True,
             bu_mashfrog=_cell(row[0]),

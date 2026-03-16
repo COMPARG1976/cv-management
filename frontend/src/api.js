@@ -285,3 +285,24 @@ export async function importCredlyBadges(token, badges) {
     token
   );
 }
+
+// ── Cert Catalog ──────────────────────────────────────────────────────────────
+
+export async function searchCertCatalog(token, q, vendor = "") {
+  const params = new URLSearchParams({ q, limit: 10 });
+  if (vendor) params.set("vendor", vendor);
+  return apiFetch(`/cv/cert-catalog/search?${params}`, {}, token);
+}
+
+export async function suggestCertCodes(token, names) {
+  // names: { cert_id: cert_name, ... }
+  return apiFetch(
+    "/cv/cert-catalog/suggest-codes",
+    { method: "POST", body: JSON.stringify({ names }) },
+    token
+  );
+}
+
+export async function refreshCertCatalog(token) {
+  return apiFetch("/cv/cert-catalog/refresh", { method: "POST" }, token);
+}

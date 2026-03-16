@@ -8,8 +8,7 @@ class Settings(BaseSettings):
     secret_key: str = "dev-secret-key-change-in-production"
     access_token_expire_minutes: int = 720
     auth_provider: str = "fake"
-    default_user_password: str = "Demo123!"
-    admin_user_password: str = "Admin123!"
+    default_password: str = "Demo123!"
     cors_origins: str = "http://localhost:8082"
     ai_service_url: str = "http://ai-services:8000"
     upload_dir: str = "/app/uploads"

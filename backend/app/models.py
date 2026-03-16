@@ -288,3 +288,23 @@ class SkillTaxonomy(Base):
     aliases: Mapped[Optional[List[str]]] = mapped_column(ARRAY(String))
     usage_count: Mapped[int] = mapped_column(Integer, default=0)
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+
+
+# ── CertCatalog (catalogo certificazioni da Credly SAP/OpenText/Databricks) ───
+
+class CertCatalogEntry(Base):
+    """
+    Catalogo certificazioni alimentato da Credly (SAP, OpenText) e lista statica
+    (Databricks). Usato per autocomplete e suggerimento codici esame.
+    Aggiornabile tramite POST /cv/cert-catalog/refresh.
+    TODO: esporre il refresh in una sezione Admin UI (Sprint futuro).
+    """
+    __tablename__ = "cert_catalog"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
+    name: Mapped[str] = mapped_column(String(500), nullable=False, index=True)
+    vendor: Mapped[str] = mapped_column(String(50),  nullable=False, index=True)
+    cert_code: Mapped[Optional[str]] = mapped_column(String(200), index=True)
+    img_url:   Mapped[Optional[str]] = mapped_column(String(1000))
+    credly_id: Mapped[Optional[str]] = mapped_column(String(200), unique=True, index=True)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
