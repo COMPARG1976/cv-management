@@ -131,7 +131,7 @@ def _build_context(cv: CV, user: User) -> dict:
             "grade":           edu.grade  or "",
             "notes":           edu.notes  or "",
         }
-        for edu in (cv.educations or [])
+        for edu in sorted(cv.educations or [], key=lambda e: e.graduation_year or 9999)
     ]
 
     # ── Lingue ────────────────────────────────────────────────────────────────
