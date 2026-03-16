@@ -246,3 +246,42 @@ export async function exportSearchExcel(token, params = {}) {
   if (!res.ok) throw new Error("Export fallito");
   return res.blob();
 }
+
+
+// ── Certification — SharePoint upload ────────────────────────────────────────
+
+export async function uploadCertDoc(token, certId, file) {
+  const formData = new FormData();
+  formData.append("file", file);
+  const res = await fetch(
+    `${BASE_URL}/cv/me/certifications/${certId}/upload-doc`,
+    {
+      method: "POST",
+      headers: { Authorization: `Bearer ${token}` },
+      body: formData,
+    }
+  );
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({}));
+    throw new Error(body.detail || "Upload documento fallito");
+  }
+  return res.json();
+}
+
+// ── Certification — Credly ────────────────────────────────────────────────────
+
+export async function previewCredlyBadges(token, credlyUrl) {
+  return apiFetch(
+    `/cv/certifications/credly/preview?url=${encodeURIComponent(credlyUrl)}`,
+    {},
+    token
+  );
+}
+
+export async function importCredlyBadges(token, badges) {
+  return apiFetch(
+    "/cv/certifications/credly/import",
+    { method: "POST", body: JSON.stringify({ badges }) },
+    token
+  );
+}

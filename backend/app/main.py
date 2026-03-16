@@ -35,10 +35,13 @@ def ensure_schema_compatibility() -> None:
     """
     from sqlalchemy import text
     with engine.connect() as conn:
-        # Esempio: aggiungi colonna se mancante
-        # conn.execute(text(
-        #     "ALTER TABLE cvs ADD COLUMN IF NOT EXISTS new_field TEXT"
-        # ))
+        # Sprint 5 — Credly badge fields
+        conn.execute(text(
+            "ALTER TABLE certifications ADD COLUMN IF NOT EXISTS credly_badge_id VARCHAR(200)"
+        ))
+        conn.execute(text(
+            "ALTER TABLE certifications ADD COLUMN IF NOT EXISTS badge_image_url VARCHAR(1000)"
+        ))
         conn.commit()
 
 

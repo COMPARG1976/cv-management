@@ -10,6 +10,7 @@ import {
   addLanguage, updateLanguage, deleteLanguage,
   addReference, updateReference, deleteReference,
   addCertification, updateCertification, deleteCertification,
+  uploadCertDoc, previewCredlyBadges, importCredlyBadges,
   getSkillSuggestions, getCertSuggestions,
   uploadCV, applyDiff, getCVHints,
   listExportTemplates, exportCVDocx,
@@ -55,7 +56,7 @@ function DateStr({ value, withTime = false }) {
   return <span>{d.toLocaleDateString("it-IT", { year: "numeric", month: "short" })}</span>;
 }
 
-function Modal({ title, onClose, onSave, saving, children }) {
+function Modal({ title, onClose, onSave, saving, saveLabel, children }) {
   return (
     <div className="modal-overlay" onClick={e => e.target === e.currentTarget && onClose()}>
       <div className="modal">
@@ -66,9 +67,11 @@ function Modal({ title, onClose, onSave, saving, children }) {
         {children}
         <div className="modal__footer">
           <button className="btn btn-secondary" onClick={onClose}>Annulla</button>
-          <button className="btn btn-primary" onClick={onSave} disabled={saving}>
-            {saving ? "Salvo..." : "Salva"}
-          </button>
+          {onSave && (
+            <button className="btn btn-primary" onClick={onSave} disabled={saving}>
+              {saving ? "Salvo..." : (saveLabel || "Salva")}
+            </button>
+          )}
         </div>
       </div>
     </div>
@@ -1012,20 +1015,33 @@ function FormazioneTab({ token, cv, setCV }) {
 
 // ── Certificazioni Tab ────────────────────────────────────────────────────────
 function CertificazioniTab({ token, cv, setCV, hints = {} }) {
-  const [modal, setModal]   = useState(null);
-  const [saving, setSaving] = useState(false);
-  const [error, setError]   = useState("");
+  const [modal, setModal]         = useState(null);  // null | {mode:"add"|"edit", item?}
+  const [saving, setSaving]       = useState(false);
+  const [error, setError]         = useState("");
+  const [uploadFile, setUploadFile] = useState(null);
+  const [uploading, setUploading] = useState(false);
+
+  // Credly import state
+  const [credlyModal, setCredlyModal]   = useState(false);
+  const [credlyUrl, setCredlyUrl]       = useState("");
+  const [credlyLoading, setCredlyLoading] = useState(false);
+  const [credlyBadges, setCredlyBadges] = useState(null);  // null | []
+  const [credlySelected, setCredlySelected] = useState({});
+  const [credlyError, setCredlyError]   = useState("");
+  const [credlyImporting, setCredlyImporting] = useState(false);
 
   const emptyForm = () => ({
     cert_code: "", name: "", issuing_org: "", year: "",
     version: "", expiry_date: "", notes: "", has_formal_cert: true,
     doc_attachment_type: "NONE", doc_url: "",
+    credly_badge_id: "", badge_image_url: "",
   });
   const [form, setForm] = useState(emptyForm());
   function upd(k, v) { setForm(f => ({ ...f, [k]: v })); }
 
   function openAdd() {
     setForm(emptyForm());
+    setUploadFile(null);
     setError("");
     setModal({ mode: "add" });
   }
@@ -1042,7 +1058,10 @@ function CertificazioniTab({ token, cv, setCV, hints = {} }) {
       has_formal_cert:     c.has_formal_cert     !== false,
       doc_attachment_type: c.doc_attachment_type || "NONE",
       doc_url:             c.doc_url             || "",
+      credly_badge_id:     c.credly_badge_id     || "",
+      badge_image_url:     c.badge_image_url     || "",
     });
+    setUploadFile(null);
     setError("");
     setModal({ mode: "edit", item: c });
   }
@@ -1054,18 +1073,45 @@ function CertificazioniTab({ token, cv, setCV, hints = {} }) {
     try {
       const payload = {
         ...form,
-        year:        form.year        ? Number(form.year) : null,
-        expiry_date: form.expiry_date || null,
-        doc_url:     form.doc_url     || null,
-        cert_code:   form.cert_code   || null,
+        year:             form.year        ? Number(form.year) : null,
+        expiry_date:      form.expiry_date || null,
+        cert_code:        form.cert_code   || null,
+        credly_badge_id:  form.credly_badge_id  || null,
+        badge_image_url:  form.badge_image_url  || null,
+        // Se SHAREPOINT con file, il doc_url verrà sovrascritto dall'upload
+        doc_url: (form.doc_attachment_type === "SHAREPOINT" && uploadFile)
+          ? null
+          : (form.doc_url || null),
       };
+
+      let cert;
       if (modal.mode === "add") {
-        const cert = await addCertification(token, payload);
+        cert = await addCertification(token, payload);
         setCV(prev => ({ ...prev, certifications: [...prev.certifications, cert] }));
       } else {
-        const cert = await updateCertification(token, modal.item.id, payload);
+        cert = await updateCertification(token, modal.item.id, payload);
         setCV(prev => ({ ...prev, certifications: prev.certifications.map(c => c.id === cert.id ? cert : c) }));
       }
+
+      // Se SHAREPOINT e file selezionato → upload
+      if (form.doc_attachment_type === "SHAREPOINT" && uploadFile) {
+        setUploading(true);
+        try {
+          const updatedCert = await uploadCertDoc(token, cert.id, uploadFile);
+          setCV(prev => ({
+            ...prev,
+            certifications: prev.certifications.map(c => c.id === updatedCert.id ? updatedCert : c),
+          }));
+        } catch (ue) {
+          // Upload fallito ma cert salvata — mostra warning non bloccante
+          setError(`Certificazione salvata, ma upload documento fallito: ${ue.message}`);
+          setModal(null);
+          return;
+        } finally {
+          setUploading(false);
+        }
+      }
+
       setModal(null);
     } catch (e) {
       setError(e.message);
@@ -1083,6 +1129,48 @@ function CertificazioniTab({ token, cv, setCV, hints = {} }) {
     }
   }
 
+  // ── Credly ──────────────────────────────────────────────────────────────────
+
+  async function loadCredlyPreview() {
+    if (!credlyUrl.trim()) return;
+    setCredlyLoading(true);
+    setCredlyError("");
+    setCredlyBadges(null);
+    setCredlySelected({});
+    try {
+      const data = await previewCredlyBadges(token, credlyUrl.trim());
+      setCredlyBadges(data.badges || []);
+      // Pre-seleziona solo i badge "new"
+      const sel = {};
+      (data.badges || []).forEach(b => { if (b.status === "new") sel[b.credly_badge_id] = true; });
+      setCredlySelected(sel);
+    } catch (e) {
+      setCredlyError(e.message);
+    } finally {
+      setCredlyLoading(false);
+    }
+  }
+
+  async function doCredlyImport() {
+    const toImport = (credlyBadges || []).filter(b => credlySelected[b.credly_badge_id]);
+    if (!toImport.length) return;
+    setCredlyImporting(true);
+    setCredlyError("");
+    try {
+      const result = await importCredlyBadges(token, toImport);
+      // Ricarica CV aggiornato
+      const fresh = await getMyCV(token);
+      setCV(fresh);
+      setCredlyModal(false);
+      setCredlyBadges(null);
+      setCredlyUrl("");
+    } catch (e) {
+      setCredlyError(e.message);
+    } finally {
+      setCredlyImporting(false);
+    }
+  }
+
   const certs = [...(cv.certifications || [])].sort((a, b) => (b.year || 0) - (a.year || 0));
 
   return (
@@ -1091,7 +1179,12 @@ function CertificazioniTab({ token, cv, setCV, hints = {} }) {
       <div className="card">
         <div className="card__header">
           <span className="card__title">Certificazioni ({certs.length})</span>
-          <button className="btn btn-primary btn-sm" onClick={openAdd}>+ Aggiungi</button>
+          <div style={{ display: "flex", gap: 8 }}>
+            <button className="btn btn-secondary btn-sm" onClick={() => { setCredlyModal(true); setCredlyBadges(null); setCredlyUrl(""); setCredlyError(""); }}>
+              Importa da Credly
+            </button>
+            <button className="btn btn-primary btn-sm" onClick={openAdd}>+ Aggiungi</button>
+          </div>
         </div>
         {certs.length === 0 ? (
           <div className="empty-state">
@@ -1105,15 +1198,25 @@ function CertificazioniTab({ token, cv, setCV, hints = {} }) {
                 <div className="section-item__title">
                   {c.name}
                   {c.version && <span style={{ fontWeight: 400, color: "var(--color-text-muted)" }}> v{c.version}</span>}
+                  {c.doc_attachment_type === "CREDLY" && (
+                    <span style={{ marginLeft: 8, fontSize: 11, background: "#ff6b35", color: "#fff", borderRadius: 4, padding: "2px 6px" }}>Credly</span>
+                  )}
+                  {c.doc_attachment_type === "SHAREPOINT" && (
+                    <span style={{ marginLeft: 8, fontSize: 11, background: "#0078d4", color: "#fff", borderRadius: 4, padding: "2px 6px" }}>SharePoint</span>
+                  )}
                 </div>
                 <div className="section-item__sub">
                   {c.issuing_org && <span>{c.issuing_org}</span>}
                   {c.year       && <span> · {c.year}</span>}
                   {c.cert_code  && <span> · {c.cert_code}</span>}
                   {c.expiry_date && <span> · Scade: <DateStr value={c.expiry_date} /></span>}
-                  {c.doc_url    && <span> · <a href={c.doc_url} target="_blank" rel="noopener noreferrer">🔗 Verifica</a></span>}
+                  {c.doc_url && c.doc_attachment_type !== "SHAREPOINT" && (
+                    <span> · <a href={c.doc_url} target="_blank" rel="noopener noreferrer">Verifica</a></span>
+                  )}
+                  {c.doc_url && c.doc_attachment_type === "SHAREPOINT" && (
+                    <span> · <span title={c.doc_url} style={{ color: "var(--color-text-muted)" }}>Documento caricato</span></span>
+                  )}
                 </div>
-                {/* Hint inline per ogni campo mancante */}
                 {(() => {
                   const ch = (hints.cert_hints || {})[String(c.id)];
                   if (!ch) return null;
@@ -1139,9 +1242,7 @@ function CertificazioniTab({ token, cv, setCV, hints = {} }) {
                           onApply={() => openEdit({ ...c, doc_url: ch.doc_url.value, doc_attachment_type: ch.doc_url.attachment_type || "URL" })}
                         />
                       )}
-                      {ch.expiry_date && (
-                        <HintChip text={ch.expiry_date.note} />
-                      )}
+                      {ch.expiry_date && <HintChip text={ch.expiry_date.note} />}
                     </div>
                   );
                 })()}
@@ -1155,16 +1256,16 @@ function CertificazioniTab({ token, cv, setCV, hints = {} }) {
         )}
       </div>
 
+      {/* ── Modale Add/Edit cert ───────────────────────────────────────────── */}
       {modal && (
         <Modal
           title={modal.mode === "add" ? "Aggiungi Certificazione" : "Modifica Certificazione"}
           onClose={() => setModal(null)}
           onSave={saveCert}
-          saving={saving}
+          saving={saving || uploading}
         >
           {error && <div className="alert alert--error">{error}</div>}
 
-          {/* Cert code con autocomplete — prima del nome per guidare il pre-fill */}
           <div className="form-group">
             <label>Codice certificazione (es. AZ-900, AWS-SAA-C03)</label>
             <AutocompleteInput
@@ -1219,7 +1320,7 @@ function CertificazioniTab({ token, cv, setCV, hints = {} }) {
           <div className="form-row">
             <div className="form-group">
               <label>Tipo documento/badge</label>
-              <select value={form.doc_attachment_type} onChange={e => upd("doc_attachment_type", e.target.value)}>
+              <select value={form.doc_attachment_type} onChange={e => { upd("doc_attachment_type", e.target.value); setUploadFile(null); }}>
                 <option value="NONE">Nessuno</option>
                 <option value="CREDLY">Credly / Badge digitale</option>
                 <option value="URL">URL pubblico</option>
@@ -1239,12 +1340,11 @@ function CertificazioniTab({ token, cv, setCV, hints = {} }) {
             </div>
           </div>
 
-          {form.doc_attachment_type !== "NONE" && (
+          {/* URL field per CREDLY e URL */}
+          {(form.doc_attachment_type === "CREDLY" || form.doc_attachment_type === "URL") && (
             <div className="form-group">
               <label>
-                {form.doc_attachment_type === "CREDLY"     ? "URL badge Credly"     :
-                 form.doc_attachment_type === "SHAREPOINT" ? "URL SharePoint"       :
-                                                             "URL documento pubblico"}
+                {form.doc_attachment_type === "CREDLY" ? "URL badge Credly" : "URL documento pubblico"}
               </label>
               <input
                 type="url"
@@ -1255,7 +1355,32 @@ function CertificazioniTab({ token, cv, setCV, hints = {} }) {
             </div>
           )}
 
-          {/* Upload file front-end only (nessun salvataggio al backend in questa versione) */}
+          {/* File upload per SHAREPOINT */}
+          {form.doc_attachment_type === "SHAREPOINT" && (
+            <div className="form-group">
+              <label>Documento da allegare (SharePoint)</label>
+              {form.doc_url && !uploadFile && (
+                <div style={{ fontSize: 12, color: "var(--color-text-muted)", marginBottom: 4 }}>
+                  Documento attuale: <em>{form.doc_url.split("/").pop()}</em>
+                  {" — "}carica un nuovo file per sostituirlo
+                </div>
+              )}
+              <input
+                type="file"
+                accept=".pdf,.jpg,.jpeg,.png,.docx,.doc"
+                style={{ padding: "4px 0" }}
+                onChange={e => setUploadFile(e.target.files[0] || null)}
+              />
+              {uploadFile && (
+                <div style={{ fontSize: 12, color: "var(--color-success)", marginTop: 4 }}>
+                  Pronto: {uploadFile.name} ({(uploadFile.size / 1024).toFixed(0)} KB)
+                </div>
+              )}
+              {uploading && <div style={{ fontSize: 12, color: "var(--color-primary)" }}>Caricamento in corso...</div>}
+            </div>
+          )}
+
+          {/* File locale solo per NONE */}
           {form.doc_attachment_type === "NONE" && (
             <div className="form-group">
               <label>Carica certificato (anteprima locale, non salvato)</label>
@@ -1267,6 +1392,93 @@ function CertificazioniTab({ token, cv, setCV, hints = {} }) {
             <label>Note</label>
             <input value={form.notes} onChange={e => upd("notes", e.target.value)} />
           </div>
+        </Modal>
+      )}
+
+      {/* ── Modale Credly import ──────────────────────────────────────────── */}
+      {credlyModal && (
+        <Modal
+          title="Importa badge da Credly"
+          onClose={() => setCredlyModal(false)}
+          onSave={credlyBadges ? doCredlyImport : null}
+          saving={credlyImporting}
+          saveLabel={`Importa selezionati (${Object.values(credlySelected).filter(Boolean).length})`}
+        >
+          {credlyError && <div className="alert alert--error">{credlyError}</div>}
+
+          <div className="form-group">
+            <label>URL profilo Credly</label>
+            <div style={{ display: "flex", gap: 8 }}>
+              <input
+                type="url"
+                value={credlyUrl}
+                onChange={e => setCredlyUrl(e.target.value)}
+                placeholder="https://www.credly.com/users/nome-utente"
+                style={{ flex: 1 }}
+                onKeyDown={e => e.key === "Enter" && loadCredlyPreview()}
+              />
+              <button
+                className="btn btn-secondary btn-sm"
+                onClick={loadCredlyPreview}
+                disabled={credlyLoading || !credlyUrl.trim()}
+              >
+                {credlyLoading ? "Caricamento..." : "Anteprima"}
+              </button>
+            </div>
+          </div>
+
+          {credlyBadges !== null && (
+            <div>
+              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 8 }}>
+                <strong>{credlyBadges.length} badge trovati</strong>
+                <div style={{ display: "flex", gap: 8 }}>
+                  <button className="btn btn-secondary btn-sm" onClick={() => {
+                    const sel = {};
+                    credlyBadges.forEach(b => { sel[b.credly_badge_id] = b.status === "new"; });
+                    setCredlySelected(sel);
+                  }}>Solo nuovi</button>
+                  <button className="btn btn-secondary btn-sm" onClick={() => {
+                    const sel = {};
+                    credlyBadges.forEach(b => { sel[b.credly_badge_id] = true; });
+                    setCredlySelected(sel);
+                  }}>Tutti</button>
+                  <button className="btn btn-secondary btn-sm" onClick={() => setCredlySelected({})}>Nessuno</button>
+                </div>
+              </div>
+              <div style={{ maxHeight: 320, overflowY: "auto", border: "1px solid var(--color-border)", borderRadius: 6 }}>
+                {credlyBadges.map(b => (
+                  <label key={b.credly_badge_id} style={{
+                    display: "flex", alignItems: "flex-start", gap: 10, padding: "10px 12px",
+                    borderBottom: "1px solid var(--color-border)", cursor: "pointer",
+                    background: credlySelected[b.credly_badge_id] ? "var(--color-bg-alt)" : "transparent",
+                  }}>
+                    <input
+                      type="checkbox"
+                      checked={!!credlySelected[b.credly_badge_id]}
+                      onChange={e => setCredlySelected(prev => ({ ...prev, [b.credly_badge_id]: e.target.checked }))}
+                      style={{ marginTop: 2, width: "auto", flexShrink: 0 }}
+                    />
+                    <div style={{ flex: 1, minWidth: 0 }}>
+                      <div style={{ fontWeight: 500, fontSize: 13 }}>{b.name}</div>
+                      <div style={{ fontSize: 12, color: "var(--color-text-muted)" }}>
+                        {b.issuing_org && <span>{b.issuing_org}</span>}
+                        {b.year && <span> · {b.year}</span>}
+                        {b.expiry_date && <span> · Scade: <DateStr value={b.expiry_date} /></span>}
+                        {b.skills_csv && <span> · {b.skills_csv}</span>}
+                      </div>
+                    </div>
+                    <span style={{
+                      fontSize: 10, fontWeight: 600, padding: "2px 6px", borderRadius: 4, flexShrink: 0,
+                      background: b.status === "existing" ? "#e3f2fd" : "#e8f5e9",
+                      color:      b.status === "existing" ? "#1565c0" : "#2e7d32",
+                    }}>
+                      {b.status === "existing" ? "Già presente" : "Nuovo"}
+                    </span>
+                  </label>
+                ))}
+              </div>
+            </div>
+          )}
         </Modal>
       )}
     </>

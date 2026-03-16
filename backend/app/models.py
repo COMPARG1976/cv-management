@@ -246,6 +246,10 @@ class Certification(Base):
     doc_url: Mapped[Optional[str]] = mapped_column(String(1000))      # URL SharePoint / Credly / altro
     has_formal_cert: Mapped[bool] = mapped_column(Boolean, default=True)
 
+    # Credly integration (Sprint 5)
+    credly_badge_id: Mapped[Optional[str]] = mapped_column(String(200))    # UUID badge Credly
+    badge_image_url: Mapped[Optional[str]] = mapped_column(String(1000))   # URL immagine badge
+
     cv: Mapped["CV"] = relationship("CV", back_populates="certifications")
 
 

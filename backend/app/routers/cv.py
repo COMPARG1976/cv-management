@@ -2,14 +2,16 @@
 Router /cv — Sprint 2+.
 GET/PUT /cv/me + CRUD sub-risorse + suggest endpoints + completeness dinamico.
 """
-from typing import List, Any
+import os
+import re
+from typing import List, Any, Dict
 
 import httpx
-from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi import APIRouter, Depends, HTTPException, Query, UploadFile, File, status
 from sqlalchemy import func
 from sqlalchemy.orm import Session, selectinload
 
-from app.database import get_db
+from app.database import get_db, settings
 from app.deps import get_current_user
 from app.models import (
     User, CV, CVSkill, Education, Language, CVRole, Reference,
@@ -637,3 +639,191 @@ def delete_certification(
         _404("Certificazione non trovata")
     db.delete(cert)
     db.commit()
+
+
+# ── Certificazioni — Upload documento (simulazione SharePoint) ────────────────
+
+@router.post("/me/certifications/{cert_id}/upload-doc", response_model=CertificationResponse)
+async def upload_cert_doc(
+    cert_id: int,
+    file: UploadFile = File(...),
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """
+    Carica un documento allegato a una certificazione.
+    Simula upload SharePoint salvando in uploads/certs/{user_id}/.
+    Idempotente: sovrascrive il file precedente se stesso cert_id.
+    """
+    from app.models import DocAttachmentType
+
+    cert = (
+        db.query(Certification)
+        .join(CV, Certification.cv_id == CV.id)
+        .filter(Certification.id == cert_id, CV.user_id == current_user.id)
+        .first()
+    )
+    if not cert:
+        _404("Certificazione non trovata")
+
+    content_bytes = await file.read()
+    if len(content_bytes) > 10 * 1024 * 1024:
+        raise HTTPException(400, "File troppo grande (max 10 MB)")
+
+    original_name = file.filename or "document"
+    ext = os.path.splitext(original_name)[1].lower() or ".bin"
+    safe_name = f"cert_{cert_id}{ext}"
+
+    cert_dir = os.path.join(settings.upload_dir, "certs", str(current_user.id))
+    os.makedirs(cert_dir, exist_ok=True)
+
+    file_path = os.path.join(cert_dir, safe_name)
+    with open(file_path, "wb") as fh:
+        fh.write(content_bytes)
+
+    simulated_url = f"/uploads/certs/{current_user.id}/{safe_name}"
+
+    cert.doc_url = simulated_url
+    cert.doc_attachment_type = DocAttachmentType.SHAREPOINT
+    db.commit()
+    db.refresh(cert)
+    return cert
+
+
+# ── Certificazioni — Credly preview ───────────────────────────────────────────
+
+@router.get("/certifications/credly/preview")
+async def credly_preview(
+    url: str = Query(..., description="URL profilo Credly"),
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> Dict:
+    """
+    Legge i badge dal profilo Credly pubblico e li confronta con le cert nel DB.
+    Restituisce lista badge con status: new | existing.
+    """
+    match = re.search(r'credly\.com/users/([^/#?]+)', url)
+    if not match:
+        raise HTTPException(400, "URL Credly non valido. Formato: https://www.credly.com/users/<username>")
+    username = match.group(1)
+    badges_url = f"https://www.credly.com/users/{username}/badges.json"
+
+    async with httpx.AsyncClient(timeout=20) as client:
+        resp = await client.get(badges_url, headers={"Accept": "application/json"})
+    if resp.status_code != 200:
+        raise HTTPException(502, f"Impossibile accedere al profilo Credly (HTTP {resp.status_code})")
+
+    raw = resp.json()
+    if isinstance(raw, list):
+        badges_raw = raw
+    elif isinstance(raw, dict):
+        badges_raw = raw.get("data", raw.get("badges", []))
+    else:
+        badges_raw = []
+
+    cv = db.query(CV).filter(CV.user_id == current_user.id).first()
+    existing_ids: set = set()
+    if cv:
+        existing_ids = {c.credly_badge_id for c in cv.certifications if c.credly_badge_id}
+
+    result = []
+    for b in badges_raw:
+        badge_id = b.get("id", "")
+        tpl = b.get("badge_template", {}) or {}
+        name = tpl.get("name", "")
+        if not name:
+            continue
+
+        issuer_entities = (b.get("issuer") or {}).get("entities", [])
+        issuing_org = ""
+        if issuer_entities:
+            issuing_org = issuer_entities[0].get("entity", {}).get("name", "")
+
+        issued_at = b.get("issued_at_date", "") or ""
+        year = int(issued_at[:4]) if len(issued_at) >= 4 else None
+        expires_at = b.get("expires_at_date")
+        expiry_date = expires_at[:10] if expires_at else None
+
+        image_url = tpl.get("image_url", "") or (tpl.get("image") or {}).get("url", "")
+
+        skills = tpl.get("skills", []) or []
+        skills_csv = ", ".join(s.get("name", "") for s in skills if s.get("name"))
+
+        result.append({
+            "credly_badge_id": badge_id,
+            "name":            name,
+            "issuing_org":     issuing_org,
+            "year":            year,
+            "expiry_date":     expiry_date,
+            "badge_image_url": image_url,
+            "skills_csv":      skills_csv,
+            "status":          "existing" if badge_id in existing_ids else "new",
+        })
+
+    return {"username": username, "total": len(result), "badges": result}
+
+
+# ── Certificazioni — Credly import ────────────────────────────────────────────
+
+@router.post("/certifications/credly/import")
+def credly_import(
+    payload: Dict,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> Dict:
+    """
+    Importa/aggiorna certificazioni da Credly.
+    payload = {"badges": [...]}
+    Idempotente: se credly_badge_id esiste aggiorna, altrimenti crea.
+    """
+    from app.models import DocAttachmentType
+
+    badges = payload.get("badges", [])
+    if not badges:
+        raise HTTPException(400, "Nessun badge da importare")
+
+    cv_id = _get_cv_id(current_user.id, db)
+
+    existing_certs = (
+        db.query(Certification)
+        .filter(
+            Certification.cv_id == cv_id,
+            Certification.credly_badge_id.isnot(None),
+        )
+        .all()
+    )
+    existing_map: Dict[str, Certification] = {c.credly_badge_id: c for c in existing_certs}
+
+    imported = 0
+    updated = 0
+    for b in badges:
+        badge_id = b.get("credly_badge_id", "")
+        if not badge_id or not b.get("name"):
+            continue
+
+        if badge_id in existing_map:
+            cert = existing_map[badge_id]
+            cert.name            = b.get("name", cert.name)
+            cert.issuing_org     = b.get("issuing_org") or cert.issuing_org
+            cert.year            = b.get("year") or cert.year
+            cert.expiry_date     = b.get("expiry_date") or cert.expiry_date
+            cert.badge_image_url = b.get("badge_image_url") or cert.badge_image_url
+            cert.doc_attachment_type = DocAttachmentType.CREDLY
+            updated += 1
+        else:
+            cert = Certification(
+                cv_id=cv_id,
+                name=b["name"],
+                issuing_org=b.get("issuing_org") or None,
+                year=b.get("year"),
+                expiry_date=b.get("expiry_date") or None,
+                credly_badge_id=badge_id,
+                badge_image_url=b.get("badge_image_url") or None,
+                doc_attachment_type=DocAttachmentType.CREDLY,
+                has_formal_cert=True,
+            )
+            db.add(cert)
+            imported += 1
+
+    db.commit()
+    return {"imported": imported, "updated": updated, "total": imported + updated}

@@ -169,6 +169,8 @@ class CertificationBase(BaseModel):
     doc_attachment_type: DocAttachmentType = DocAttachmentType.NONE
     doc_url: Optional[str] = None
     has_formal_cert: bool = True
+    credly_badge_id: Optional[str] = None
+    badge_image_url: Optional[str] = None
 
 
 class CertificationCreate(CertificationBase):
