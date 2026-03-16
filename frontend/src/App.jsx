@@ -12,6 +12,7 @@ import {
   addCertification, updateCertification, deleteCertification,
   getSkillSuggestions, getCertSuggestions,
   uploadCV, applyDiff, getCVHints,
+  listExportTemplates, exportCVDocx,
 } from "./api.js";
 
 // ── Costanti ──────────────────────────────────────────────────────────────────
@@ -302,6 +303,7 @@ function MyCVView({ token, currentUser, onBack }) {
           ["cert",       "🏅 Certificazioni"],
           ["lingue",     "🌍 Lingue"],
           ["upload",     "📤 Carica CV"],
+          ["export",     "⬇️ Esporta CV"],
         ].map(([key, label]) => (
           <button
             key={key}
@@ -321,6 +323,7 @@ function MyCVView({ token, currentUser, onBack }) {
       {cv && activeTab === "cert"        && <CertificazioniTab {...tabProps} />}
       {cv && activeTab === "lingue"      && <LingueTab        {...tabProps} />}
       {cv && activeTab === "upload"      && <UploadTab {...tabProps} />}
+      {cv && activeTab === "export"     && <ExportTab token={token} />}
     </>
   );
 }
@@ -815,7 +818,12 @@ function EsperienzeTab({ token, cv, setCV, hints = {} }) {
                 </div>
                 {r.project_description && (
                   <div style={{ fontSize: 12, marginTop: 4, color: "var(--color-text-muted)" }}>
-                    {r.project_description}
+                    <strong>Progetto:</strong> {r.project_description}
+                  </div>
+                )}
+                {r.activities && (
+                  <div style={{ fontSize: 12, marginTop: 2, color: "var(--color-text-muted)" }}>
+                    <strong>Attività:</strong> {r.activities}
                   </div>
                 )}
                 {/* Hint inline per campi mancanti */}
@@ -1879,6 +1887,108 @@ function SuccessStep({ result, onReset }) {
       </div>
       <div style={{display:"flex",gap:12,justifyContent:"center"}}>
         <button className="btn btn-secondary" onClick={onReset}>Carica altro CV</button>
+      </div>
+    </div>
+  );
+}
+
+// ── Export Tab ────────────────────────────────────────────────────────────────
+function ExportTab({ token }) {
+  const [templates, setTemplates] = useState([]);
+  const [loadingTmpls, setLoadingTmpls] = useState(true);
+  const [error, setError]         = useState("");
+  const [downloading, setDownloading] = useState(null);
+
+  useEffect(() => {
+    listExportTemplates(token)
+      .then(data => setTemplates(data.templates || []))
+      .catch(err  => setError(err.message))
+      .finally(()  => setLoadingTmpls(false));
+  }, [token]);
+
+  async function handleDownload(tmpl) {
+    setDownloading(tmpl.filename);
+    setError("");
+    try {
+      const blob = await exportCVDocx(token, tmpl.filename);
+      const url  = window.URL.createObjectURL(blob);
+      const a    = document.createElement("a");
+      a.href     = url;
+      a.download = tmpl.filename.replace("Template_IT_", "CV_").replace("Template_EN_", "CV_EN_");
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      window.URL.revokeObjectURL(url);
+    } catch (err) {
+      setError(err.message);
+    } finally {
+      setDownloading(null);
+    }
+  }
+
+  return (
+    <div className="tab-content">
+      <h2 className="section-title">Esporta CV</h2>
+
+      {error && <div className="alert alert--danger">{error}</div>}
+
+      {loadingTmpls ? (
+        <div className="loading">Caricamento template...</div>
+      ) : templates.length === 0 ? (
+        <div className="alert alert--warning">Nessun template disponibile.</div>
+      ) : (
+        <div style={{ display: "flex", flexWrap: "wrap", gap: 16, marginTop: 16 }}>
+          {templates.map(tmpl => (
+            <div key={tmpl.filename} style={{
+              border: "1px solid var(--color-border)",
+              borderRadius: 8,
+              padding: "16px 20px",
+              minWidth: 230,
+              background: "var(--color-bg-card)",
+              display: "flex",
+              flexDirection: "column",
+              gap: 10,
+            }}>
+              <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                <span style={{
+                  background:   tmpl.language === "EN" ? "#3b82f6" : "#10b981",
+                  color:        "#fff",
+                  borderRadius: 4,
+                  padding:      "2px 8px",
+                  fontSize:     11,
+                  fontWeight:   700,
+                  letterSpacing: 0.5,
+                }}>{tmpl.language}</span>
+                <span style={{ fontWeight: 600, fontSize: 14 }}>{tmpl.display_name}</span>
+              </div>
+
+              {tmpl.language === "EN" && (
+                <div style={{ fontSize: 12, color: "var(--color-text-muted)" }}>
+                  Traduzione automatica via AI
+                </div>
+              )}
+
+              <button
+                className="btn btn-primary btn-sm"
+                disabled={!!downloading}
+                onClick={() => handleDownload(tmpl)}
+                style={{ marginTop: 4 }}
+              >
+                {downloading === tmpl.filename ? "Generazione..." : "Scarica DOCX"}
+              </button>
+            </div>
+          ))}
+        </div>
+      )}
+
+      <div style={{
+        marginTop: 24, padding: 12,
+        background: "#f8fafc", borderRadius: 6,
+        fontSize: 12, color: "var(--color-text-muted)",
+        border: "1px solid var(--color-border)",
+      }}>
+        {/* TODO Admin: aggiungere upload template dalla sezione Admin */}
+        I template disponibili sono quelli caricati dall'amministratore nella directory templates.
       </div>
     </div>
   );

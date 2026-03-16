@@ -218,6 +218,24 @@ export async function getCVHints(token) {
   return apiFetch("/cv/me/hints", {}, token);
 }
 
+// ── Export CV DOCX ────────────────────────────────────────────────────────────
+
+export async function listExportTemplates(token) {
+  return apiFetch("/export/templates", {}, token);
+}
+
+export async function exportCVDocx(token, templateFilename) {
+  const res = await fetch(
+    `${BASE_URL}/export/cv/docx?template=${encodeURIComponent(templateFilename)}`,
+    { headers: { Authorization: `Bearer ${token}` } }
+  );
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({}));
+    throw new Error(body.detail || "Export fallito");
+  }
+  return res.blob();
+}
+
 // ── Export ────────────────────────────────────────────────────────────────────
 
 export async function exportSearchExcel(token, params = {}) {

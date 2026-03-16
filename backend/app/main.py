@@ -81,9 +81,8 @@ app.include_router(upload.router, prefix="/upload", tags=["upload"])
 # from app.routers import search
 # app.include_router(search.router, prefix="/api/v1", tags=["public-api"])
 
-# TODO Sprint 5: export router
-# from app.routers import export
-# app.include_router(export.router, prefix="/export", tags=["export"])
+from app.routers import export  # noqa: E402
+app.include_router(export.router, prefix="/export", tags=["export"])
 
 
 # ── Health ────────────────────────────────────────────────────────────────────
