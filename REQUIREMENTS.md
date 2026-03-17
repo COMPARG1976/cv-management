@@ -1,8 +1,8 @@
 # CV Management System — Requisiti
 
-> Versione: 0.4 — Documento di riferimento per lo sviluppo iterativo
-> Data: 2026-03-16
-> Stato: In evoluzione (Sprint 5 in corso)
+> Versione: 0.5 — Documento di riferimento per lo sviluppo iterativo
+> Data: 2026-03-17
+> Stato: In evoluzione (Sprint 6 pianificato)
 
 ---
 
@@ -15,13 +15,14 @@
 | FR-AUTH-001 | Login con username (email) e password | MUST |
 | FR-AUTH-002 | Sessione basata su JWT con scadenza configurabile (default 12h) | MUST |
 | FR-AUTH-003 | Controllo accessi basato su ruoli: USER e ADMIN | MUST |
-| FR-AUTH-004 | Architettura compatibile con futura integrazione Microsoft Entra ID (Azure AD) | SHOULD |
+| FR-AUTH-004 | SSO Microsoft Entra ID (Azure AD) — login con account aziendale Microsoft | MUST |
 | FR-AUTH-005 | Logout con invalidazione token lato client | MUST |
 | FR-AUTH-006 | Refresh token (futura implementazione) | COULD |
+| FR-AUTH-007 | Un utente ADMIN può promuovere/degradare altri utenti a ADMIN o USER | MUST |
 
 **Ruoli applicativi:**
 - **USER**: può gestire solo il proprio CV
-- **ADMIN**: accesso completo a tutti i CV, ricerca, analytics, export, gestione utenti
+- **ADMIN**: accesso completo a tutti i CV, ricerca, analytics, export, gestione utenti (incluso promozione ad ADMIN)
 
 ---
 
@@ -66,10 +67,10 @@
 | FR-CV-043 | Campo `cert_code` (codice esame ufficiale, es. C_S4FTR_2023) | SHOULD |
 | FR-CV-044 | Campo `badge_image_url` per immagine badge Credly/Accredible | SHOULD |
 | FR-CV-045 | Campo `credly_badge_id` per collegamento diretto al badge Credly | SHOULD |
-| FR-CV-046 | Autocomplete sul campo "Nome" dalla tabella cert_catalog (fonti ufficiali) | SHOULD |
-| FR-CV-047 | Autocomplete sul campo "Codice" con suggerimento codici da cert_catalog | SHOULD |
-| FR-CV-048 | Hint chip "Codice esame: X_XXXX · Vendor" per cert senza codice se match trovato | COULD |
-| FR-CV-049 | Anteprima badge Credly con immagine, nome, emissione e scadenza | COULD |
+| FR-CV-046 | Suggerimento codice esame per cert esistenti senza codice, basato su cert già presenti nel DB con codice (fuzzy match Jaccard ≥ 0.80) | SHOULD |
+| FR-CV-047 | Hint chip "Codice esame: X_XXXX" per cert senza codice se match trovato | COULD |
+| FR-CV-048 | Anteprima badge Credly con immagine, nome, emissione e scadenza | COULD |
+| FR-CV-049 | Allegato certificazione su SharePoint — link a documento condiviso | SHOULD |
 
 #### FR-CV-LANG — Lingue
 | ID | Requisito | Priorità |
@@ -107,20 +108,27 @@
 |----|-----------|----------|
 | FR-ADMIN-001 | Vedere lista di tutti gli utenti con stato CV (completo/incompleto/assente) | MUST |
 | FR-ADMIN-002 | Creare nuovo utente (anagrafica + ruolo + password temporanea) | MUST |
-| FR-ADMIN-003 | Modificare ruolo utente | MUST |
+| FR-ADMIN-003 | Modificare ruolo utente (USER ↔ ADMIN) | MUST |
 | FR-ADMIN-004 | Disattivare/riattivare utente (soft delete) | MUST |
 | FR-ADMIN-005 | Reset password utente | SHOULD |
 | FR-ADMIN-006 | UI per rigenerare/inviare password temporanee (tramite `init_passwords.py`) | COULD |
 
-#### FR-ADMIN-CATALOG — Gestione Catalogo Certificazioni
+#### FR-ADMIN-ANALYTICS — People Analytics (nuovo tile Admin)
 | ID | Requisito | Priorità |
 |----|-----------|----------|
-| FR-ADMIN-CAT-001 | Visualizzare il catalogo certificazioni (SAP, OpenText, Databricks, …) | SHOULD |
-| FR-ADMIN-CAT-002 | Trigger manuale aggiornamento catalogo da fonti ufficiali (POST /cv/cert-catalog/refresh) | SHOULD |
-| FR-ADMIN-CAT-003 | Storico ultimo aggiornamento catalogo e numero entry per vendor | COULD |
-| FR-ADMIN-CAT-004 | Aggiunta manuale entry al catalogo | COULD |
+| FR-ADMIN-PA-001 | Tile dedicato "People Analytics" nella home Admin | MUST |
+| FR-ADMIN-PA-002 | Ricerca/filtro per: nome, skill, livello skill, certificazione, lingua, disponibilità, BU, sede, anni esperienza | MUST |
+| FR-ADMIN-PA-003 | Tabella risultati con colonne configurabili (nome, BU, sede, skill principali, cert, disponibilità) | MUST |
+| FR-ADMIN-PA-004 | Selezione multipla di righe risultato per export batch | MUST |
+| FR-ADMIN-PA-005 | Export Excel (.xlsx) dei risultati selezionati con dati completi | MUST |
+| FR-ADMIN-PA-006 | Export PDF CV per ogni utente selezionato (zip batch se multipli) | SHOULD |
+| FR-ADMIN-PA-007 | Export JSON strutturato dei CV selezionati (per integrazione con altri sistemi) | MUST |
+| FR-ADMIN-PA-008 | Dashboard skill: top skill aziendali per frequenza | SHOULD |
+| FR-ADMIN-PA-009 | Heatmap/distribuzione livelli per skill | COULD |
+| FR-ADMIN-PA-010 | Metriche di completezza CV aziendali | SHOULD |
+| FR-ADMIN-PA-011 | Gap analysis: skill richieste vs. presenti | COULD |
 
-#### FR-ADMIN-SEARCH — Ricerca e Filtri
+#### FR-ADMIN-SEARCH — Ricerca e Filtri (integrata in People Analytics)
 | ID | Requisito | Priorità |
 |----|-----------|----------|
 | FR-ADMIN-010 | Ricerca full-text su tutti i CV (nome, skill, ruolo, azienda) | MUST |
@@ -130,22 +138,24 @@
 | FR-ADMIN-014 | Filtro per certificazione | SHOULD |
 | FR-ADMIN-015 | Filtro per disponibilità | SHOULD |
 | FR-ADMIN-016 | Filtro per lingua | SHOULD |
-| FR-ADMIN-017 | Salvataggio filtri/ricerche frequenti | COULD |
-
-#### FR-ADMIN-ANALYTICS — Analytics
-| ID | Requisito | Priorità |
-|----|-----------|----------|
-| FR-ADMIN-020 | Dashboard skill: top skill aziendali per frequenza | MUST |
-| FR-ADMIN-021 | Heatmap/distribuzione livelli per skill | SHOULD |
-| FR-ADMIN-022 | Metriche di completezza CV aziendali | SHOULD |
-| FR-ADMIN-023 | Gap analysis: skill richieste vs. presenti | COULD |
+| FR-ADMIN-017 | Filtro per BU e sede Mashfrog | SHOULD |
+| FR-ADMIN-018 | Salvataggio filtri/ricerche frequenti | COULD |
 
 #### FR-ADMIN-EXPORT — Export Dati
 | ID | Requisito | Priorità |
 |----|-----------|----------|
 | FR-ADMIN-030 | Export risultati ricerca in Excel (.xlsx) | MUST |
-| FR-ADMIN-031 | Export CV singolo in PDF | SHOULD |
-| FR-ADMIN-032 | Export anagrafica utenti completa | SHOULD |
+| FR-ADMIN-031 | Export CV singolo o batch in PDF | SHOULD |
+| FR-ADMIN-032 | Export CV singolo o batch in JSON strutturato | MUST |
+| FR-ADMIN-033 | Export anagrafica utenti completa | SHOULD |
+
+#### FR-ADMIN-SHAREPOINT — Integrazione Allegati
+| ID | Requisito | Priorità |
+|----|-----------|----------|
+| FR-ADMIN-SP-001 | Collegare una certificazione a un documento su SharePoint (URL) | MUST |
+| FR-ADMIN-SP-002 | Apertura documento SharePoint da link nel CV | MUST |
+| FR-ADMIN-SP-003 | Upload diretto su SharePoint via Microsoft Graph API | COULD |
+| FR-ADMIN-SP-004 | Sincronizzazione automatica allegati SharePoint | COULD |
 
 ---
 
@@ -188,6 +198,7 @@
 | NFR-PERF-002 | Salvataggio/caricamento CV: < 1 secondo |
 | NFR-PERF-003 | AI parsing documento: < 60 secondi (async con feedback progress) |
 | NFR-PERF-004 | Export Excel 200 righe: < 5 secondi |
+| NFR-PERF-005 | Export JSON batch 50 CV: < 10 secondi |
 
 ### NFR-SEC — Sicurezza
 | ID | Requisito |
@@ -199,6 +210,8 @@
 | NFR-SEC-005 | Nessun dato sensibile nei log applicativi |
 | NFR-SEC-006 | HTTPS in produzione (configurazione Nginx) |
 | NFR-SEC-007 | Un utente USER può accedere solo ai propri dati CV |
+| NFR-SEC-008 | Solo un ADMIN può promuovere altri utenti ad ADMIN |
+| NFR-SEC-009 | Token Microsoft Entra validato con chiavi pubbliche JWKS di Azure |
 
 ### NFR-MOD — Modularità e Riusabilità
 | ID | Requisito |
@@ -228,11 +241,15 @@
 | ORM | SQLAlchemy 2.0 | Consistenza progetto |
 | Database | PostgreSQL 15 | JSONB, array, full-text search, ENUM |
 | Frontend | React 18 + Vite 5 | Consistenza con IT_RESOURCE_MGMT, no Node.js locale |
-| Auth | JWT HS256 + passlib pbkdf2 | Consistenza progetto, Entra-ready |
+| Auth locale | JWT HS256 + passlib pbkdf2 | Consistenza progetto, Entra-ready |
+| Auth SSO | Microsoft Entra ID (MSAL + Microsoft Graph) | Account aziendali esistenti |
 | AI | OpenAI API (gpt-4o) | Qualità parsing, tool use per structured output |
+| Export Excel | openpyxl | Già in stack |
+| Export PDF | docxtpl + template DOCX | Già avviato Sprint 5 |
+| Export JSON | json stdlib | Nativo Python |
 | Containerizzazione | Docker + Docker Compose | Richiesto, portabilità |
 | Reverse Proxy | Nginx (nel container frontend) | Consistenza, SPA routing |
-| File Storage | Volume Docker | Semplicità iniziale (S3-ready in futuro) |
+| File Storage | Volume Docker (SharePoint via link/Graph API) | Semplicità iniziale |
 
 ### TR-DATA — Struttura Dati
 | ID | Requisito |
@@ -243,6 +260,7 @@
 | TR-DATA-004 | Upload files memorizzati su volume, path nel DB |
 | TR-DATA-005 | Soft delete per utenti (campo `is_active`) |
 | TR-DATA-006 | Timestamp `created_at`, `updated_at` su tutte le entità principali |
+| TR-DATA-007 | Suggest-codes: source è `Certification.cert_code` (per-utente, non catalogo centrale) |
 
 ### TR-API — Design API
 | ID | Requisito |
@@ -258,54 +276,66 @@
 
 ## 4. Scope Sprint (alta priorità)
 
-### Sprint 1 — Fondamenta (MUST)
+### Sprint 1 — Fondamenta ✅ (2026-03-14)
 - Setup progetto, Docker Compose funzionante
 - Backend: auth (login/logout), modello User, JWT
 - Database: schema utenti + CV (struttura base)
 - Frontend: login page, navigazione base, home page
 
-### Sprint 2 — CV Base (MUST)
+### Sprint 2 — CV Base ✅ (2026-03-14)
 - Backend: CRUD CV (anagrafica, skills, esperienze, formazione)
 - Frontend: form CV utente (sezioni anagrafica + skill)
 - Completeness score basic
 
-### Sprint 3 — AI Parsing (MUST)
+### Sprint 3 — AI Parsing ✅ (2026-03-15)
 - AI Service: endpoint parsing documento
 - Backend: upload file, chiamata AI service, risposta strutturata
 - Frontend: wizard upload → validazione dati estratti
 
-### Sprint 4 — Sort + Export Prep + Hints (MUST) ✅
+### Sprint 4 — Sort + Export Prep + Hints ✅ (2026-03-16)
 - Ordinamento referenze: end_date DESC NULLS FIRST + start_date DESC (sentinella "9999-99")
 - Hint chips DB-driven: infrastruttura presente, disabilitata (riattivabile)
 - Export DOCX: `docxtpl==0.19.0` in requirements.txt, `export.py` router registrato
-- AITab + suggester.py: codice presente, non attivo
 - Password sync: `_sync_all_passwords` in lifespan per consistenza tutti gli utenti
 
-### Sprint 5 — Cert Catalog + Export DOCX (IN CORSO)
-- **Completato:**
-  - Modello `CertCatalogEntry` (tabella `cert_catalog`): `name`, `vendor`, `cert_code`, `img_url`, `credly_id`
-  - Script `_build_cert_catalog.py`: scarica SAP (113 cert), OpenText (227), Databricks (10 statici)
-  - `populate_cert_catalog()` idempotente in lifespan — 2168 entry totali nel DB
-  - `GET /cv/cert-catalog/search?q=&vendor=&limit=10` — autocomplete ILIKE
-  - `POST /cv/cert-catalog/suggest-codes` — fuzzy match (SequenceMatcher ≥ 0.80) per cert esistenti
-  - `POST /cv/cert-catalog/refresh` — re-fetch + aggiorna JSON + DB
-  - Frontend: `AutocompleteInput` su campo Nome cert (pre-carica `cert_code`, `issuing_org`, `badge_image_url`)
-  - Frontend: hint chip "Codice esame: X_XXXX · Vendor" per cert senza codice con match ≥ 0.80
-  - Credly preview arricchita con `cert_code` dal catalogo via `credly_id`
-- **In corso:**
-  - Export CV DOCX (`docxtpl`) — router presente, template da creare
-  - Admin UI per trigger refresh catalogo certificazioni
+### Sprint 5 — Cert Suggest + Refactoring ✅ (2026-03-17)
+- Credly preview: anteprima badge da profilo Credly pubblico
+- `POST /cv/cert-catalog/suggest-codes` — fuzzy match (Jaccard + SequenceMatcher ≥ 0.80) su cert utenti esistenti con codice
+- Refactoring: eliminata tabella `cert_catalog` centralizzata; la fonte dei suggerimenti è ora la tabella `certifications` (per-utente, cert già presenti con codice valorizzato)
+- Rimossi endpoint: `GET /cv/cert-catalog/search`, `POST /cv/cert-catalog/refresh`
+- Eliminati: script `update_opentext_certs.py`, file `cert_catalog.json`, modello `CertCatalogEntry`
 
-### Sprint 6 — Admin Core + API Pubblica (MUST per integrazione)
-- Backend: API pubblica `/resources/search`, `/resources/{id}`
-- Frontend: vista admin — lista utenti, ricerca, filtri skill, analytics
-- Documentazione API
+### Sprint 6 — SSO + People Analytics + Role Management (PIANIFICATO)
+
+#### 6a — SSO Microsoft Entra ID
+- Integrazione login con account Microsoft aziendale (MSAL flow)
+- Token Entra ID validato dal backend (JWKS endpoint Azure)
+- Mapping claim `preferred_username` / `email` → utente nel DB
+- `AUTH_PROVIDER=entra` in `.env` per switch senza code change
+- Fallback su auth locale se Entra non configurato
+
+#### 6b — Role Management (ADMIN promuove altri ADMIN)
+- Endpoint `PUT /users/{id}/role` — accessibile solo da ADMIN
+- Frontend: nella lista utenti (tab Admin), dropdown ruolo con opzioni USER/ADMIN
+- Audit: log della promozione (chi ha promosso chi, quando)
+
+#### 6c — People Analytics (tile Admin)
+- Nuovo tile "People Analytics" nella home Admin
+- Ricerca/filtro multi-criterio: skill, livello, cert, lingua, disponibilità, BU, sede
+- Tabella risultati con selezione multipla
+- Export batch: Excel, PDF (zip), JSON strutturato per righe selezionate
+- Dashboard: top skill, distribuzione livelli, completezza CV
+
+#### 6d — Integrazione Allegati SharePoint
+- Campo `sharepoint_url` su `Certification` e `Reference`
+- Link cliccabile nel CV verso documento SharePoint
+- (Futura) upload diretto via Microsoft Graph API
 
 ---
 
 ## 5. Out of Scope (v1)
 
-- SSO / Microsoft Entra ID (architettura compatibile, non implementato)
+- SSO / Microsoft Entra ID → **spostato in Sprint 6** (non più out of scope)
 - Notifiche email (es. CV in scadenza)
 - Mobile app
 - S3 / storage cloud per upload
@@ -313,3 +343,4 @@
 - Import bulk utenti da Active Directory
 - CV multi-lingua
 - Integrazione con sistemi di recruiting esterni
+- Upload diretto su SharePoint via Graph API (solo link per ora)

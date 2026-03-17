@@ -209,6 +209,32 @@ AUTH_PROVIDER=fake
 - Frontend: `ProfileSection` — campi scalari del profilo con controllo per-field
 - Fix: sostituito `React.useState/useRef/useEffect` con hook named (mancava import React namespace)
 
+### Sprint 4 — Sort + Credly + Hints ✅ (2026-03-16)
+- Ordinamento referenze: end_date DESC NULLS FIRST + start_date DESC (sentinella "9999-99")
+- Hint chips DB-driven: infrastruttura presente, disabilitata (riattivabile)
+- Export DOCX: `docxtpl==0.19.0` in requirements.txt, `export.py` router registrato
+- Password sync: `_sync_all_passwords` in lifespan per consistenza tutti gli utenti
+- Credly preview: `GET /cv/certifications/credly/preview?url=...` — anteprima badge profilo pubblico
+
+### Sprint 5 — Cert Suggest Refactoring ✅ (2026-03-17)
+- Eliminata tabella `cert_catalog` centralizzata (modello `CertCatalogEntry`, JSON, script scraping)
+- `POST /cv/cert-catalog/suggest-codes` — nuova fonte: `Certification WHERE cert_code IS NOT NULL` (per-utente)
+  - Algoritmo: Jaccard token-based + SequenceMatcher, soglia 0.80
+  - Stop words ridotte — ruoli (administrator, analyst, user...) NON sono stop words
+- Rimossi: `GET /cv/cert-catalog/search`, `POST /cv/cert-catalog/refresh`
+- Rimossi: `scripts/update_opentext_certs.py`, `backend/app/cert_catalog.json`
+- `populate_cert_catalog()` rimossa da `main.py`
+
+### Sprint 6 — TODO (pianificato)
+- **SSO Microsoft Entra ID**: login con account aziendale Microsoft (MSAL + token Entra)
+- **Role Management**: ADMIN può promuovere/degradare altri utenti (PUT /users/{id}/role)
+- **People Analytics** (nuovo tile Admin):
+  - Ricerca multi-criterio (skill, cert, lingua, BU, disponibilità)
+  - Tabella risultati con selezione multipla
+  - Export Excel, Export PDF batch (zip), Export JSON strutturato
+  - Dashboard: top skill, completezza CV, distribuzione disponibilità
+- **Integrazione allegati SharePoint**: campo `sharepoint_url` su Certification e Reference
+
 ---
 
 ## Note per Claude Code

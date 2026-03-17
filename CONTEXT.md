@@ -1,7 +1,7 @@
 # CV Management System — Contesto Architetturale
 
 > Documento di riferimento per decisioni tecniche e pattern architetturali
-> Data: 2026-03-16 (aggiornato Sprint 5)
+> Data: 2026-03-17 (aggiornato Sprint 5)
 
 ---
 
@@ -23,7 +23,8 @@
                          ▼
 ┌─────────────────────────────────────────────────────────────────┐
 │                  Backend Container (FastAPI)                     │
-│  • Auth (JWT), RBAC, CV CRUD, Ricerca, Export                   │
+│  • Auth (JWT locale + Entra SSO), RBAC, CV CRUD                 │
+│  • Ricerca, Export, People Analytics                            │
 │  • REST API versioned: /api/v1/                                 │
 │  • Upload gestione file (volume condiviso)                      │
 │  • Chiama AI service per parsing (interno :8000)                │
@@ -91,15 +92,19 @@
 - JSONB limitato a metadati AI (raw output, confidenze) — non alla struttura principale
 - Alternativa JSONB-only: facile da scrivere, difficile da interrogare → scartata
 
-### 2.5 Autenticazione JWT + Entra-Ready
-**Decisione:** Auth locale JWT in v1, architettura predisposta per Entra ID.
-**Motivazione (v1 fake auth):**
+### 2.5 Autenticazione: JWT locale + Entra ID (Sprint 6)
+**Decisione:** Auth locale JWT in v1 (Sprint 1-5), migrazione a Entra ID in Sprint 6.
+**Motivazione (v1 locale):**
 - Sviluppo rapido senza dipendenze Azure
 - Pattern identico a IT_RESOURCE_MGMT → riuso codice security.py
-**Predisposizione Entra:**
+**Predisposizione Entra (già presente):**
 - Endpoint `/auth/entra/exchange` per token exchange
 - Claims mapping configurabile (`preferred_username`, `email`)
 - `AUTH_PROVIDER` env var per switch senza code change
+**Sprint 6 — implementazione completa:**
+- MSAL flow lato frontend (redirect → Microsoft → callback con code)
+- Backend valida token Entra con JWKS endpoint Azure
+- Creazione utente automatica al primo login SSO se email non esiste nel DB
 
 ### 2.6 API Pubblica Versionata (`/api/v1/`)
 **Decisione:** Prefisso di versione su tutte le route.
@@ -107,6 +112,15 @@
 - IT_RESOURCE_MGMT e altri servizi consumeranno queste API
 - Versioning previene breaking changes quando si aggiorna il contratto
 - `/api/v1/resources/search` → endpoint chiave per integrazione inter-app
+
+### 2.7 Suggest-Codes: fonte da Certification (non catalogo centrale)
+**Decisione Sprint 5:** Eliminata tabella `cert_catalog` centralizzata.
+**Razionale:**
+- Mantenere un catalogo aggiornato (SAP, OpenText, Databricks) richiedeva scraping fragile e soggetto a errori
+- La vera fonte di verità sono le certificazioni già inserite da utenti reali con `cert_code` valorizzato
+- Vantaggi: zero manutenzione, autoarricchimento nel tempo, nessun false positive da dati errati
+- `POST /cv/cert-catalog/suggest-codes` ora fa query `DISTINCT (name, cert_code)` su `Certification WHERE cert_code IS NOT NULL`
+- Stesso algoritmo: Jaccard + SequenceMatcher, soglia ≥ 0.80
 
 ---
 
@@ -136,8 +150,8 @@ User (1)──────────────────(1) CV
  │                              │     ├── name, issuing_org
  │                              │     ├── year (int), expiry_date
  │                              │     ├── cert_code                ← codice esame (es. C_S4FTR_2023)
- │                              │     ├── credly_badge_id          ← ID badge Credly (Sprint 5)
- │                              │     ├── badge_image_url          ← URL immagine badge (Sprint 5)
+ │                              │     ├── credly_badge_id          ← ID badge Credly
+ │                              │     ├── badge_image_url          ← URL immagine badge
  │                              │     └── credential_url
  │                              │
  │                              ├── Language (N)
@@ -157,15 +171,6 @@ SkillTaxonomy (tassonomia centralizzata)
  ├── category
  ├── aliases (TEXT[])
  └── usage_count (aggiornato da trigger/query)
-
-CertCatalogEntry (catalogo certificazioni ufficiali — Sprint 5)
- ├── id (PK)
- ├── name (indexed)          ← nome ufficiale del certificato
- ├── vendor (indexed)        ← SAP | OpenText | Databricks | …
- ├── cert_code (indexed)     ← codice esame (es. C_S4FTR_2023, DF101E)
- ├── img_url                 ← URL immagine badge ufficiale
- ├── credly_id               ← badge_template.id da Credly (unique)
- └── updated_at              ← server_default now(), aggiornato ad ogni populate
 ```
 
 ### Enum Types
@@ -195,13 +200,13 @@ backend/
 │   ├── crud.py          # helper CRUD riutilizzabili
 │   ├── seed.py          # dati demo (admin + utenti test)
 │   └── routers/
-│       ├── auth.py      # POST /auth/login, GET /auth/config
-│       ├── users.py     # CRUD utenti (solo ADMIN)
-│       ├── cv.py        # CRUD CV (USER: proprio, ADMIN: tutti)
+│       ├── auth.py      # POST /auth/login, GET /auth/config, Entra exchange
+│       ├── users.py     # CRUD utenti (solo ADMIN), PUT /users/{id}/role
+│       ├── cv.py        # CRUD CV (USER: proprio, ADMIN: tutti), suggest-codes
 │       ├── skills.py    # Tassonomia skill, autocomplete
 │       ├── search.py    # Ricerca avanzata (ADMIN + API pubblica)
 │       ├── upload.py    # Upload documenti, trigger AI
-│       └── export.py    # Export Excel, PDF
+│       └── export.py    # Export Excel, PDF (docxtpl), JSON batch
 ```
 
 ### Middleware Stack
@@ -222,6 +227,11 @@ def get_cv_or_403(cv_id, current_user, db):
 # Solo ADMIN
 @router.get("/admin/users")
 def list_users(user=Depends(require_roles(Role.ADMIN)), db=Depends(get_db)):
+    ...
+
+# Promozione ruolo — solo ADMIN
+@router.put("/users/{id}/role")
+def update_role(user=Depends(require_roles(Role.ADMIN)), ...):
     ...
 ```
 
@@ -249,10 +259,13 @@ LOGIN → HOME
               │     └── Upload CV (wizard AI)
               │
               └── (ADMIN) Pannello Admin
-                    ├── Utenti (lista + gestione)
-                    ├── Ricerca per Skill
-                    ├── Analytics & Dashboard
-                    └── Export
+                    ├── Utenti (lista + gestione + modifica ruolo)
+                    ├── People Analytics (nuovo Sprint 6)
+                    │     ├── Ricerca multi-criterio
+                    │     ├── Tabella risultati + selezione
+                    │     ├── Export Excel / PDF / JSON
+                    │     └── Dashboard skill & completezza
+                    └── Ricerca per Skill
 ```
 
 ---
@@ -324,58 +337,114 @@ GET /api/v1/skills
 
 ---
 
-## 8. Cert Catalog — Architettura (Sprint 5)
+## 8. Suggest-Codes — Architettura (Sprint 5, refactored)
 
-### Sorgenti dati
-| Vendor | Sorgente | Metodo | Entry |
-|--------|----------|--------|-------|
-| SAP | `learning.sap.com/service/catalog-download/json` | HTTP + filtro `Learning_object_ID` regex `^[CEP]_` | 113 (dedup per cert_code) |
-| OpenText | `opentext.com/TrainingRegistry` — lista `<option>` fornita manualmente | Parser regex `^CODE - Description` | 227 (211 con codice) |
-| Databricks | Lista statica — sito Angular SPA, Accredible API richiede auth | Hardcoded in `_build_cert_catalog.py` | 10 |
-| Credly | `api.credly.com/v1/organizations/{org_id}/badges` | HTTP JSON (precedenti sprint) | ~2000+ |
+### Fonte dati
+Nessun catalogo centralizzato. La fonte sono le certificazioni già inserite da utenti nel DB:
 
-**Totale DB:** ~2168 entry (Credly entries caricate da sprint precedenti + le 350 dell'import ufficiale)
-
-### File chiave
-| File | Ruolo |
-|------|-------|
-| `_build_cert_catalog.py` | Script standalone (eseguito una tantum o per aggiornamenti) — genera `backend/app/cert_catalog.json` |
-| `backend/app/cert_catalog.json` | File JSON sorgente, 62 KB, 350 entry (SAP+OpenText+Databricks) |
-| `backend/app/main.py` → `populate_cert_catalog()` | Upsert idempotente al startup: cerca per `credly_id` o `(name, vendor)` |
-| `backend/app/routers/cv.py` | Tre nuovi endpoint: `search`, `suggest-codes`, `refresh` |
-| `frontend/src/api.js` | `searchCertCatalog`, `suggestCertCodes`, `refreshCertCatalog` |
-| `frontend/src/App.jsx` | `AutocompleteInput` su Nome cert + hint chip + Credly preview arricchita |
-
-### Endpoint cert-catalog
+```sql
+SELECT DISTINCT name, cert_code
+FROM certifications
+WHERE cert_code IS NOT NULL AND cert_code != ''
 ```
-GET  /cv/cert-catalog/search?q=sap+fiori&vendor=SAP&limit=10
-     → [{name, vendor, cert_code, img_url, credly_id}]
-     Ricerca ILIKE: exact code match → starts-with → contains
 
+Man mano che gli utenti popolano i propri CV con `cert_code` valorizzato, la base di suggerimento si arricchisce automaticamente.
+
+### Endpoint
+```
 POST /cv/cert-catalog/suggest-codes
-     Body: {names: {cert_id: "SAP Certified Application Associate - SAP Fiori"}}
-     → {cert_id: {cert_code, name, vendor, score}}
-     Fuzzy match (SequenceMatcher ≥ 0.80) su tutto il catalogo
+     Body: {"names": {"cert_id": "Nome certificazione da suggerire"}}
+     → {"cert_id": {"name": "...", "cert_code": "...", "score": 0.93}}
 
-POST /cv/cert-catalog/refresh
-     → {added, updated, total}
-     Re-fetch SAP+OpenText+Databricks, aggiorna JSON + DB
-     (TODO: restringere a ruolo ADMIN)
+     Algoritmo: max(SequenceMatcher ratio, Jaccard token score)
+     Soglia minima: 0.80
+     Stop words: certified, opentext, for, the, in, of, a, an, using, managing,
+                 configuring, implementing, technology, sap
+     Ruoli (administrator, business, user, analyst, developer) NON sono stop words
 ```
 
-### Frontend — UX certificazioni
-1. **Autocomplete su Nome**: mentre si digita → `GET /cv/cert-catalog/search` → dropdown con immagine + vendor + codice. On-select: pre-popola `name`, `issuing_org`, `cert_code`, `badge_image_url`.
-2. **Hint chip**: al caricamento CV, `suggestCertCodes` per tutte le cert senza `cert_code` → se match ≥ 0.80 e codice disponibile → chip blu "Codice esame: X_XXXX · SAP". Click → applica.
-3. **Credly preview**: badge enriched con `cert_code` dal catalogo tramite match `credly_id = badge_template.id`.
+### Decisione architetturale: perché niente catalogo centrale
+- Un catalogo centrale richiede scraping periodico di fonti eterogenee (SAP, OpenText, Databricks, Credly) soggette a cambiare struttura
+- I codici scraped possono essere errati o non aggiornati
+- La "fonte di verità" sono i codici che gli utenti già usano e validano
+- Approccio autosufficiente: zero dipendenze esterne, migliora con l'uso
 
 ---
 
-## 9. Migrazione/Evoluzione Prevista
+## 9. SSO Microsoft Entra ID — Piano Sprint 6
+
+### Flusso MSAL (Authorization Code)
+```
+Frontend                    Backend                  Azure AD
+   │                           │                        │
+   │──click "Login Microsoft"──▶│                        │
+   │                           │──redirect ─────────────▶│
+   │◀──────────────────────────────────── login form ────│
+   │──credenziali Microsoft────────────────────────────▶│
+   │◀──────────────────── authorization code ────────────│
+   │──POST /auth/entra/exchange──▶│                       │
+   │  {code, redirect_uri}       │──validate token via───▶│
+   │                           │  JWKS endpoint          │
+   │◀──{access_token, user} ───│◀───────────────────────│
+```
+
+### Configurazione `.env` per Entra
+```
+AUTH_PROVIDER=entra
+AZURE_TENANT_ID=<tenant-id>
+AZURE_CLIENT_ID=<app-client-id>
+AZURE_CLIENT_SECRET=<secret>   # solo backend (confidential client)
+```
+
+### Mapping Claims → User DB
+| Claim Entra | Campo User DB | Note |
+|-------------|---------------|------|
+| `preferred_username` / `email` | `email` | lookup principale |
+| `name` | `full_name` | usato solo alla creazione |
+| `oid` | `azure_oid` (futura colonna) | identificativo stabile |
+
+---
+
+## 10. People Analytics — Piano Sprint 6
+
+### Backend: nuovi endpoint in `search.py` o `analytics.py`
+```
+GET /admin/analytics/people
+    ?skill=Java&skill_level=AVANZATO&cert=C_S4FTR&lang=EN&bu=&available=true
+    &q=cognome
+    → {total: int, items: [{user_id, full_name, bu, skills[], certs[], ...}]}
+
+POST /admin/analytics/export/excel
+    Body: {user_ids: [1,2,3,...], fields: ["name","skills","certs",...]}
+    → StreamingResponse (.xlsx)
+
+POST /admin/analytics/export/json
+    Body: {user_ids: [1,2,3,...]}
+    → JSON array CV completi
+
+POST /admin/analytics/export/pdf-batch
+    Body: {user_ids: [1,2,3,...]}
+    → StreamingResponse (.zip con PDF per utente)
+```
+
+### Frontend: PeopleAnalyticsView
+- Pannello filtri laterale (skill multi-select, livello, cert, lingua, BU, disponibilità)
+- Tabella risultati con checkbox per selezione multipla
+- Barra azioni contestuale quando ≥1 selezionato: "Export Excel", "Export PDF", "Export JSON"
+- Sezione dashboard collassabile: top skill, completezza CV, distribuzione disponibilità
+
+---
+
+## 11. Migrazione/Evoluzione Prevista
 
 | Versione | Aggiunta | Note |
 |----------|----------|------|
-| v1 | Core CV + AI parsing + Admin search | Questo documento |
-| v2 | Entra ID SSO | Switch `AUTH_PROVIDER=entra` |
+| v1 (Sprint 1-5) | Core CV + AI parsing | Completato |
+| v1.1 (Sprint 6) | SSO Entra ID | Switch `AUTH_PROVIDER=entra` |
+| v1.1 (Sprint 6) | People Analytics + Export batch | Nuovo tile Admin |
+| v1.1 (Sprint 6) | Role management ADMIN | PUT /users/{id}/role |
+| v1.1 (Sprint 6) | SharePoint link su allegati | Campo `sharepoint_url` |
+| v2 | Upload diretto su SharePoint (Graph API) | OAuth2 on-behalf-of |
 | v2 | Notifiche email (certificazioni in scadenza) | SMTP + scheduler |
 | v3 | Storage S3 per upload | Replace volume con boto3 |
 | v3 | API key per service-to-service | Header `X-API-Key` |
@@ -383,7 +452,7 @@ POST /cv/cert-catalog/refresh
 
 ---
 
-## 10. Riferimenti
+## 12. Riferimenti
 
 - **Progetto di riferimento:** `C:\20.PROGETTI_CLAUDE_CODE\20.IT_RESOURCE_MGMT`
 - Pattern autenticazione: `20.IT_RESOURCE_MGMT/backend/app/security.py`

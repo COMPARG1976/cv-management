@@ -3,7 +3,6 @@ CV Management System — Backend FastAPI
 Entry point: lifespan, middleware, router registration, health endpoint.
 """
 import os
-import json
 import logging
 from contextlib import asynccontextmanager
 
@@ -17,9 +16,6 @@ from app.seed_excel import seed_from_excel
 
 logger = logging.getLogger(__name__)
 
-CATALOG_JSON = os.path.join(os.path.dirname(__file__), "cert_catalog.json")
-
-
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     # Startup
@@ -31,7 +27,6 @@ async def lifespan(app: FastAPI):
         seed_from_excel(db)     # crea utenti Excel con PLACEHOLDER_HASH
         from app.seed import _sync_all_passwords
         _sync_all_passwords(db) # ri-sincronizza TUTTI (inclusi quelli appena creati da Excel)
-        populate_cert_catalog(db)
     yield
     # Shutdown (nessuna azione necessaria)
 
@@ -53,61 +48,6 @@ def ensure_schema_compatibility() -> None:
         ))
         conn.commit()
 
-
-def populate_cert_catalog(db) -> int:
-    """
-    Popola la tabella cert_catalog dal file cert_catalog.json.
-    Esegue UPSERT su credly_id (se presente) oppure su (name, vendor).
-    Restituisce il numero di righe inserite/aggiornate.
-    Idempotente: sicuro da chiamare ad ogni avvio.
-    """
-    from app.models import CertCatalogEntry
-    from sqlalchemy import select
-
-    if not os.path.exists(CATALOG_JSON):
-        logger.warning("cert_catalog.json non trovato, skip populate.")
-        return 0
-
-    with open(CATALOG_JSON, encoding="utf-8") as f:
-        entries = json.load(f)
-
-    count = 0
-    for e in entries:
-        name      = (e.get("name") or "").strip()
-        vendor    = (e.get("vendor") or "").strip()
-        cert_code = (e.get("cert_code") or "").strip() or None
-        img_url   = (e.get("img_url") or "").strip() or None
-        credly_id = (e.get("credly_id") or "").strip() or None
-        if not name or not vendor:
-            continue
-
-        # Cerca per credly_id se disponibile, altrimenti per (name, vendor)
-        if credly_id:
-            row = db.execute(
-                select(CertCatalogEntry).where(CertCatalogEntry.credly_id == credly_id)
-            ).scalar_one_or_none()
-        else:
-            row = db.execute(
-                select(CertCatalogEntry).where(
-                    CertCatalogEntry.name == name,
-                    CertCatalogEntry.vendor == vendor,
-                )
-            ).scalar_one_or_none()
-
-        if row:
-            row.name      = name
-            row.cert_code = cert_code
-            row.img_url   = img_url
-        else:
-            db.add(CertCatalogEntry(
-                name=name, vendor=vendor,
-                cert_code=cert_code, img_url=img_url, credly_id=credly_id,
-            ))
-        count += 1
-
-    db.commit()
-    logger.info("cert_catalog: %d voci sincronizzate.", count)
-    return count
 
 
 app = FastAPI(

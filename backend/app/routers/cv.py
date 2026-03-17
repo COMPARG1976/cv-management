@@ -15,7 +15,7 @@ from app.database import get_db, settings
 from app.deps import get_current_user
 from app.models import (
     User, CV, CVSkill, Education, Language, CVRole, Reference,
-    Certification, AvailabilityStatus, CertCatalogEntry,
+    Certification, AvailabilityStatus,
 )
 from app.schemas import (
     CVFullResponse, CVUpdate,
@@ -749,16 +749,6 @@ async def credly_preview(
         skills = tpl.get("skills", []) or []
         skills_csv = ", ".join(s.get("name", "") for s in skills if s.get("name"))
 
-        # Arricchisci con cert_code dal catalog (match esatto su credly_id)
-        tpl_id = tpl.get("id", "")
-        catalog_code = None
-        if tpl_id:
-            cat = db.query(CertCatalogEntry).filter(
-                CertCatalogEntry.credly_id == tpl_id
-            ).first()
-            if cat:
-                catalog_code = cat.cert_code
-
         result.append({
             "credly_badge_id": badge_id,
             "name":            name,
@@ -767,7 +757,7 @@ async def credly_preview(
             "expiry_date":     expiry_date,
             "badge_image_url": image_url,
             "skills_csv":      skills_csv,
-            "cert_code":       catalog_code,
+            "cert_code":       None,
             "status":          "existing" if badge_id in existing_ids else "new",
         })
 
@@ -843,64 +833,7 @@ def credly_import(
     return {"imported": imported, "updated": updated, "total": imported + updated}
 
 
-# ── Cert Catalog — search / refresh ───────────────────────────────────────────
-
-@router.get("/cert-catalog/search")
-def cert_catalog_search(
-    q: str = Query("", description="Testo libero su nome o codice"),
-    vendor: str = Query("", description="Filtra per vendor (SAP, OpenText, Databricks)"),
-    limit: int = Query(10, le=30),
-    current_user: User = Depends(get_current_user),
-    db: Session = Depends(get_db),
-):
-    """
-    Ricerca nel catalogo certificazioni per autocomplete.
-    Cerca su name e cert_code con ILIKE.
-    Ordine: corrispondenza esatta codice → inizia-con → contiene.
-    """
-    from sqlalchemy import or_, case
-
-    q = q.strip()
-    if not q:
-        return []
-
-    q_like = f"%{q}%"
-    q_start = f"{q}%"
-
-    filters = [
-        CertCatalogEntry.name.ilike(q_like),
-        CertCatalogEntry.cert_code.ilike(q_like),
-    ]
-    if vendor:
-        filters_combined = [
-            or_(*filters),
-            CertCatalogEntry.vendor == vendor,
-        ]
-        from sqlalchemy import and_
-        query = db.query(CertCatalogEntry).filter(and_(*filters_combined))
-    else:
-        query = db.query(CertCatalogEntry).filter(or_(*filters))
-
-    # Ordine: codice esatto → codice inizia-con → nome inizia-con → contiene
-    order = case(
-        (CertCatalogEntry.cert_code.ilike(q),      0),
-        (CertCatalogEntry.cert_code.ilike(q_start), 1),
-        (CertCatalogEntry.name.ilike(q_start),      2),
-        else_=3,
-    )
-    rows = query.order_by(order, CertCatalogEntry.name).limit(limit).all()
-
-    return [
-        {
-            "id":        r.id,
-            "name":      r.name,
-            "vendor":    r.vendor,
-            "cert_code": r.cert_code,
-            "img_url":   r.img_url,
-        }
-        for r in rows
-    ]
-
+# ── Cert Catalog — suggest codes ──────────────────────────────────────────────
 
 @router.post("/cert-catalog/suggest-codes")
 def cert_catalog_suggest_codes(
@@ -910,11 +843,10 @@ def cert_catalog_suggest_codes(
 ):
     """
     Dato un dizionario {cert_id: name}, restituisce il miglior match
-    nel catalog per ogni name. Usato per suggerire codici su cert esistenti.
+    tra le certificazioni già salvate nel DB che hanno cert_code valorizzato.
+    Usato per suggerire codici su cert esistenti senza codice.
 
-    Algoritmo: max(SequenceMatcher, token_containment).
-    Token containment = len(cert_tokens ∩ catalog_tokens) / len(catalog_tokens).
-    Gestisce nomi Credly (lunghi, formali) vs nomi TrainingRegistry (corti, essenziali).
+    Algoritmo: max(SequenceMatcher, Jaccard sui token).
     """
     from difflib import SequenceMatcher
     import unicodedata
@@ -923,128 +855,56 @@ def cert_catalog_suggest_codes(
     if not names:
         return {}
 
-    # Solo entry con cert_code valorizzato — le Credly senza codice non servono al suggerimento
-    catalog = db.query(CertCatalogEntry).filter(CertCatalogEntry.cert_code.isnot(None)).all()
+    # Fonte: certificazioni già inserite da qualsiasi utente con cert_code valorizzato.
+    # Deduplicate per (name, cert_code) per non avere migliaia di copie identiche.
+    existing = (
+        db.query(Certification.name, Certification.cert_code)
+        .filter(Certification.cert_code.isnot(None), Certification.cert_code != "")
+        .distinct()
+        .all()
+    )
+    if not existing:
+        return {}
 
-    # Termini generici che non aiutano il matching (presenti sia nei nomi Credly che TrainingRegistry)
+    # Stop words: solo parole non-discriminanti (preposizioni, brand, verbi generici)
+    # NON includere ruoli (administrator, business, user, analyst, developer) — sono discriminanti!
     _STOP = {
         "certified", "opentext", "for", "the", "in", "of", "a", "an",
-        "administrator", "associate", "professional", "specialist",
-        "business", "cloud", "practitioner", "advanced", "using",
-        "managing", "configuring", "implementing", "foundation",
-        "administration", "management", "services", "service", "core",
-        "application", "development", "technology", "sap",
+        "using", "managing", "configuring", "implementing",
+        "technology", "sap",
     }
 
     def _tokens(s: str) -> set:
-        """Tokenizza rimuovendo punteggiatura e stop words."""
         words = re.sub(r"[^a-z0-9]", " ", s.lower()).split()
         return {w for w in words if w not in _STOP and len(w) > 2}
 
     def norm(s: str) -> str:
-        """Normalizza per SequenceMatcher: rimuove accenti e termini comuni."""
         s = unicodedata.normalize("NFD", s.lower())
         s = "".join(c for c in s if unicodedata.category(c) != "Mn")
         s = re.sub(r'[^a-z0-9\s]', ' ', s)
         s = re.sub(r'\b(sap certified|certified|associate|professional|specialist|application|development|technology)\b', '', s)
         return re.sub(r'\s+', ' ', s).strip()
 
-    # Pre-calcola normalizzazione e token per ogni entry del catalog
-    cat_data = [(norm(e.name), _tokens(e.name), e) for e in catalog]
+    # Pre-calcola normalizzazione e token per ogni entry disponibile
+    cat_data = [(norm(row.name), _tokens(row.name), row) for row in existing]
     result = {}
 
     for cert_id, name in names.items():
         n = norm(name)
         ct = _tokens(name)
-        best_score, best = 0.0, None
-        for cat_n, cat_tokens, entry in cat_data:
-            # Score 1: SequenceMatcher su nomi normalizzati
+        best_score, best_row = 0.0, None
+        for cat_n, cat_tokens, row in cat_data:
             seq = SequenceMatcher(None, n, cat_n).ratio()
-            # Score 2: token containment — quanti token del catalogo sono presenti nel nome cert?
-            # Alta quando il nome cert contiene tutti i termini significativi del catalogo
-            containment = len(ct & cat_tokens) / len(cat_tokens) if cat_tokens else 0.0
-            s = max(seq, containment)
+            union = ct | cat_tokens
+            jaccard = len(ct & cat_tokens) / len(union) if union else 0.0
+            s = max(seq, jaccard)
             if s > best_score:
-                best_score, best = s, entry
-        if best and best_score >= 0.80:
+                best_score, best_row = s, row
+        if best_row and best_score >= 0.80:
             result[cert_id] = {
-                "name":      best.name,
-                "vendor":    best.vendor,
-                "cert_code": best.cert_code,
-                "img_url":   best.img_url,
+                "name":      best_row.name,
+                "cert_code": best_row.cert_code,
                 "score":     round(best_score, 3),
             }
 
     return result
-
-
-@router.post("/cert-catalog/refresh")
-async def cert_catalog_refresh(
-    current_user: User = Depends(get_current_user),
-    db: Session = Depends(get_db),
-):
-    """
-    Ri-fetcha i badge da Credly (SAP, OpenText) e aggiorna cert_catalog.
-    Databricks è lista statica — non ri-fetchata qui.
-    TODO: spostare in sezione Admin UI e limitare al ruolo ADMIN.
-    """
-    import time
-    from app.main import populate_cert_catalog, CATALOG_JSON
-    import json as _json
-
-    ORGS = {"SAP": "sap", "OpenText": "opentext"}
-    DATABRICKS_STATIC = [
-        {"name": "Databricks Certified Associate Developer for Apache Spark",   "cert_code": "databricks-associate-developer-apache-spark", "vendor": "Databricks", "img_url": "", "credly_id": ""},
-        {"name": "Databricks Certified Data Engineer Associate",                 "cert_code": "databricks-data-engineer-associate",          "vendor": "Databricks", "img_url": "", "credly_id": ""},
-        {"name": "Databricks Certified Data Engineer Professional",              "cert_code": "databricks-data-engineer-professional",       "vendor": "Databricks", "img_url": "", "credly_id": ""},
-        {"name": "Databricks Certified Machine Learning Associate",              "cert_code": "databricks-machine-learning-associate",       "vendor": "Databricks", "img_url": "", "credly_id": ""},
-        {"name": "Databricks Certified Machine Learning Professional",           "cert_code": "databricks-machine-learning-professional",    "vendor": "Databricks", "img_url": "", "credly_id": ""},
-        {"name": "Databricks Certified Data Analyst Associate",                  "cert_code": "databricks-data-analyst-associate",           "vendor": "Databricks", "img_url": "", "credly_id": ""},
-        {"name": "Databricks Certified Generative AI Engineer Associate",        "cert_code": "databricks-generative-ai-engineer-associate", "vendor": "Databricks", "img_url": "", "credly_id": ""},
-        {"name": "Databricks Certified Hadoop Migration Architect",              "cert_code": "databricks-hadoop-migration-architect",       "vendor": "Databricks", "img_url": "", "credly_id": ""},
-    ]
-
-    import re as _re
-
-    def _extract_code(name: str) -> str:
-        m = _re.match(r'^([CEP]_[A-Z0-9_]+)\b', name)
-        return m.group(1) if m else ""
-
-    def _credly_to_entry(b: dict, vendor: str) -> dict:
-        bt = b.get("badge_template", b)
-        name = (bt.get("name") or b.get("name") or "").strip()
-        img  = bt.get("image", {})
-        img_url = img.get("url", "") if isinstance(img, dict) else str(img or "")
-        return {
-            "name":      name,
-            "cert_code": _extract_code(name),
-            "vendor":    vendor,
-            "img_url":   img_url,
-            "credly_id": str(bt.get("id", b.get("id", "")) or ""),
-        }
-
-    all_entries = list(DATABRICKS_STATIC)
-    fetch_stats = {}
-
-    async with httpx.AsyncClient(timeout=20) as client:
-        for vendor, slug in ORGS.items():
-            badges, page_url = [], f"https://www.credly.com/organizations/{slug}/badges.json?page=1"
-            while page_url:
-                try:
-                    r = await client.get(page_url, headers={"Accept": "application/json"})
-                    d = r.json()
-                    data = d.get("data", []) if isinstance(d, dict) else d
-                    badges.extend(data)
-                    page_url = d.get("metadata", {}).get("next_page_url") if isinstance(d, dict) else None
-                except Exception:
-                    break
-            all_entries.extend(_credly_to_entry(b, vendor) for b in badges if b.get("badge_template", {}).get("name") or b.get("name"))
-            fetch_stats[vendor] = len(badges)
-
-    # Salva JSON su disco
-    with open(CATALOG_JSON, "w", encoding="utf-8") as f:
-        _json.dump(all_entries, f, ensure_ascii=False, indent=2)
-
-    # Sincronizza DB
-    synced = populate_cert_catalog(db)
-    return {"synced": synced, "fetch_stats": fetch_stats, "total_entries": len(all_entries)}
