@@ -41,6 +41,13 @@ export async function getAuthConfig() {
   return apiFetch("/auth/config");
 }
 
+export async function entraExchange(code, redirectUri) {
+  return apiFetch("/auth/entra/exchange", {
+    method: "POST",
+    body: JSON.stringify({ code, redirect_uri: redirectUri }),
+  });
+}
+
 // ── Users (ADMIN) ─────────────────────────────────────────────────────────────
 
 export async function getUsers(token) {

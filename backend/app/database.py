@@ -1,3 +1,4 @@
+from typing import Optional
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker, DeclarativeBase
 from pydantic_settings import BaseSettings
@@ -13,6 +14,17 @@ class Settings(BaseSettings):
     ai_service_url: str = "http://ai-services:8000"
     upload_dir: str = "/app/uploads"
     max_upload_size_mb: int = 10
+
+    # ── Microsoft Entra ID (Azure AD) ─────────────────────────────────────────
+    entra_tenant_id: Optional[str] = None
+    entra_client_id: Optional[str] = None
+    entra_client_secret: Optional[str] = None
+    entra_audience: Optional[str] = None       # default: api://<client_id>
+    entra_redirect_uri: str = "http://localhost:8082/auth/callback"
+
+    @property
+    def entra_enabled(self) -> bool:
+        return bool(self.entra_tenant_id and self.entra_client_id and self.entra_client_secret)
 
     model_config = {"env_file": ".env", "extra": "ignore"}
 

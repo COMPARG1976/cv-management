@@ -23,6 +23,15 @@ class TokenResponse(BaseModel):
 
 class AuthConfig(BaseModel):
     provider: str
+    entra_enabled: bool = False
+    entra_client_id: Optional[str] = None
+    entra_tenant_id: Optional[str] = None
+    entra_redirect_uri: Optional[str] = None
+
+
+class EntraExchangeRequest(BaseModel):
+    code: str
+    redirect_uri: str
 
 
 # ── User ──────────────────────────────────────────────────────────────────────

@@ -78,6 +78,46 @@ body {
 .login-card h1 { font-size: 22px; margin-bottom: 8px; }
 .login-card p  { color: var(--color-text-muted); margin-bottom: 28px; font-size: 13px; }
 
+/* Bottone Microsoft Entra ID */
+.btn-microsoft {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  width: 100%;
+  padding: 10px 16px;
+  background: #fff;
+  color: #1e293b;
+  border: 1px solid #d1d5db;
+  border-radius: var(--radius);
+  font-size: 14px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: background 0.15s, box-shadow 0.15s;
+  margin-bottom: 4px;
+}
+.btn-microsoft:hover {
+  background: #f3f4f6;
+  box-shadow: 0 1px 4px rgba(0,0,0,.12);
+}
+.btn-microsoft:active { background: #e5e7eb; }
+
+/* Divisore "oppure" */
+.login-divider {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin: 18px 0 14px;
+  color: var(--color-text-muted);
+  font-size: 12px;
+}
+.login-divider::before,
+.login-divider::after {
+  content: "";
+  flex: 1;
+  border-top: 1px solid var(--color-border);
+}
+
 /* ── Cards ────────────────────────────────────────────────────────────────── */
 .card {
   background: var(--color-surface);

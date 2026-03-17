@@ -4,7 +4,8 @@
  */
 import { useState, useEffect, useRef } from "react";
 import {
-  login, getMyCV, updateMyCV,
+  login, entraExchange, getAuthConfig,
+  getMyCV, updateMyCV,
   addSkill, updateSkill, deleteSkill,
   addEducation, updateEducation, deleteEducation,
   addLanguage, updateLanguage, deleteLanguage,
@@ -135,7 +136,52 @@ export default function App() {
     const u = sessionStorage.getItem("cv_user");
     return u ? JSON.parse(u) : null;
   });
-  const [view, setView] = useState(VIEWS.HOME);
+  const [view, setView]           = useState(VIEWS.HOME);
+  const [entraLoading, setEntraLoading] = useState(false);
+  const [entraError,   setEntraError]   = useState("");
+
+  // Intercetta il callback Entra ID (?code=...&state=...)
+  useEffect(() => {
+    const params  = new URLSearchParams(window.location.search);
+    const code    = params.get("code");
+    const errParam = params.get("error");
+
+    if (errParam) {
+      const desc = params.get("error_description") || errParam;
+      setEntraError(`Accesso Microsoft negato: ${desc}`);
+      window.history.replaceState({}, "", window.location.pathname);
+      return;
+    }
+
+    if (!code) return;
+
+    // Verifica CSRF state
+    const savedState    = sessionStorage.getItem("entra_state");
+    const returnedState = params.get("state");
+    window.history.replaceState({}, "", window.location.pathname);
+
+    if (savedState && returnedState !== savedState) {
+      setEntraError("Errore di sicurezza: state non valido. Riprovare.");
+      return;
+    }
+
+    const redirectUri = sessionStorage.getItem("entra_redirect_uri")
+      || `${window.location.origin}/auth/callback`;
+    sessionStorage.removeItem("entra_state");
+    sessionStorage.removeItem("entra_redirect_uri");
+
+    setEntraLoading(true);
+    entraExchange(code, redirectUri)
+      .then(data => {
+        sessionStorage.setItem("cv_token", data.access_token);
+        const user = { email: data.email, role: data.role, full_name: data.full_name };
+        sessionStorage.setItem("cv_user", JSON.stringify(user));
+        setToken(data.access_token);
+        setCurrentUser(user);
+      })
+      .catch(err => setEntraError(err.message))
+      .finally(() => setEntraLoading(false));
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
   function handleLogout() {
     sessionStorage.removeItem("cv_token");
@@ -145,13 +191,30 @@ export default function App() {
     setView(VIEWS.HOME);
   }
 
+  if (entraLoading) {
+    return (
+      <div className="login-wrapper">
+        <div className="login-card" style={{ textAlign: "center" }}>
+          <div style={{ fontSize: 32, marginBottom: 16 }}>⏳</div>
+          <h2>Autenticazione Microsoft in corso...</h2>
+          <p style={{ color: "var(--color-text-muted)", marginTop: 8 }}>
+            Verifica del token Entra ID
+          </p>
+        </div>
+      </div>
+    );
+  }
+
   if (!token) {
-    return <LoginPage onLogin={(tok, user) => {
-      sessionStorage.setItem("cv_token", tok);
-      sessionStorage.setItem("cv_user", JSON.stringify(user));
-      setToken(tok);
-      setCurrentUser(user);
-    }} />;
+    return <LoginPage
+      onLogin={(tok, user) => {
+        sessionStorage.setItem("cv_token", tok);
+        sessionStorage.setItem("cv_user", JSON.stringify(user));
+        setToken(tok);
+        setCurrentUser(user);
+      }}
+      entraError={entraError}
+    />;
   }
 
   return (
@@ -176,12 +239,32 @@ export default function App() {
   );
 }
 
+// Icona Microsoft 4-quadrati (logo ufficiale)
+function MicrosoftIcon() {
+  return (
+    <svg width="18" height="18" viewBox="0 0 21 21" fill="none" xmlns="http://www.w3.org/2000/svg">
+      <rect x="0"  y="0"  width="10" height="10" fill="#F25022"/>
+      <rect x="11" y="0"  width="10" height="10" fill="#7FBA00"/>
+      <rect x="0"  y="11" width="10" height="10" fill="#00A4EF"/>
+      <rect x="11" y="11" width="10" height="10" fill="#FFB900"/>
+    </svg>
+  );
+}
+
 // ── Login Page ────────────────────────────────────────────────────────────────
-function LoginPage({ onLogin }) {
+function LoginPage({ onLogin, entraError }) {
   const [email, setEmail]       = useState("");
   const [password, setPassword] = useState("");
   const [loading, setLoading]   = useState(false);
   const [error, setError]       = useState("");
+  const [authConfig, setAuthConfig] = useState(null);
+
+  // Carica configurazione auth (per sapere se Entra è abilitato)
+  useEffect(() => {
+    getAuthConfig()
+      .then(cfg => setAuthConfig(cfg))
+      .catch(() => {}); // Silenzioso: se fallisce si usa solo il login locale
+  }, []);
 
   async function handleSubmit(e) {
     e.preventDefault();
@@ -197,16 +280,64 @@ function LoginPage({ onLogin }) {
     }
   }
 
+  function handleEntraLogin() {
+    if (!authConfig?.entra_enabled) return;
+
+    // Genera CSRF state casuale
+    const state       = Math.random().toString(36).substring(2) + Date.now().toString(36);
+    const redirectUri = authConfig.entra_redirect_uri
+      || `${window.location.origin}/auth/callback`;
+
+    sessionStorage.setItem("entra_state",        state);
+    sessionStorage.setItem("entra_redirect_uri", redirectUri);
+
+    const url = new URL(
+      `https://login.microsoftonline.com/${authConfig.entra_tenant_id}/oauth2/v2.0/authorize`
+    );
+    url.searchParams.set("client_id",      authConfig.entra_client_id);
+    url.searchParams.set("response_type",  "code");
+    url.searchParams.set("redirect_uri",   redirectUri);
+    url.searchParams.set("scope",          "openid email profile");
+    url.searchParams.set("state",          state);
+    url.searchParams.set("response_mode",  "query");
+    url.searchParams.set("prompt",         "select_account");
+
+    window.location.href = url.toString();
+  }
+
+  const entraEnabled = authConfig?.entra_enabled;
+
   return (
     <div className="login-wrapper">
       <div className="login-card">
         <h1>CV Management</h1>
         <p>Accedi con le credenziali aziendali</p>
-        {error && <div className="alert alert--error">{error}</div>}
+
+        {(entraError || error) && (
+          <div className="alert alert--error">{entraError || error}</div>
+        )}
+
+        {/* Bottone Entra ID — mostrato solo se configurato */}
+        {entraEnabled && (
+          <>
+            <button
+              type="button"
+              className="btn-microsoft"
+              onClick={handleEntraLogin}
+            >
+              <MicrosoftIcon />
+              Entra con Autenticazione Aziendale
+            </button>
+            <div className="login-divider">
+              <span>oppure accedi con password locale</span>
+            </div>
+          </>
+        )}
+
         <form onSubmit={handleSubmit}>
           <div className="form-group">
             <label>Email</label>
-            <input type="email" value={email} onChange={e => setEmail(e.target.value)} required autoFocus />
+            <input type="email" value={email} onChange={e => setEmail(e.target.value)} required autoFocus={!entraEnabled} />
           </div>
           <div className="form-group">
             <label>Password</label>
