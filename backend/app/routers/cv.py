@@ -911,6 +911,10 @@ def cert_catalog_suggest_codes(
     """
     Dato un dizionario {cert_id: name}, restituisce il miglior match
     nel catalog per ogni name. Usato per suggerire codici su cert esistenti.
+
+    Algoritmo: max(SequenceMatcher, token_containment).
+    Token containment = len(cert_tokens ∩ catalog_tokens) / len(catalog_tokens).
+    Gestisce nomi Credly (lunghi, formali) vs nomi TrainingRegistry (corti, essenziali).
     """
     from difflib import SequenceMatcher
     import unicodedata
@@ -919,25 +923,47 @@ def cert_catalog_suggest_codes(
     if not names:
         return {}
 
-    # Carica tutte le voci del catalog in memoria (max ~1900 righe)
-    catalog = db.query(CertCatalogEntry).all()
+    # Solo entry con cert_code valorizzato — le Credly senza codice non servono al suggerimento
+    catalog = db.query(CertCatalogEntry).filter(CertCatalogEntry.cert_code.isnot(None)).all()
+
+    # Termini generici che non aiutano il matching (presenti sia nei nomi Credly che TrainingRegistry)
+    _STOP = {
+        "certified", "opentext", "for", "the", "in", "of", "a", "an",
+        "administrator", "associate", "professional", "specialist",
+        "business", "cloud", "practitioner", "advanced", "using",
+        "managing", "configuring", "implementing", "foundation",
+        "administration", "management", "services", "service", "core",
+        "application", "development", "technology", "sap",
+    }
+
+    def _tokens(s: str) -> set:
+        """Tokenizza rimuovendo punteggiatura e stop words."""
+        words = re.sub(r"[^a-z0-9]", " ", s.lower()).split()
+        return {w for w in words if w not in _STOP and len(w) > 2}
 
     def norm(s: str) -> str:
+        """Normalizza per SequenceMatcher: rimuove accenti e termini comuni."""
         s = unicodedata.normalize("NFD", s.lower())
         s = "".join(c for c in s if unicodedata.category(c) != "Mn")
-        import re as _re
-        s = _re.sub(r'[^a-z0-9\s]', ' ', s)
-        s = _re.sub(r'\b(sap certified|certified|associate|professional|specialist|application|development|technology)\b', '', s)
-        return _re.sub(r'\s+', ' ', s).strip()
+        s = re.sub(r'[^a-z0-9\s]', ' ', s)
+        s = re.sub(r'\b(sap certified|certified|associate|professional|specialist|application|development|technology)\b', '', s)
+        return re.sub(r'\s+', ' ', s).strip()
 
-    cat_norm = [(norm(e.name), e) for e in catalog]
+    # Pre-calcola normalizzazione e token per ogni entry del catalog
+    cat_data = [(norm(e.name), _tokens(e.name), e) for e in catalog]
     result = {}
 
     for cert_id, name in names.items():
         n = norm(name)
+        ct = _tokens(name)
         best_score, best = 0.0, None
-        for cat_n, entry in cat_norm:
-            s = SequenceMatcher(None, n, cat_n).ratio()
+        for cat_n, cat_tokens, entry in cat_data:
+            # Score 1: SequenceMatcher su nomi normalizzati
+            seq = SequenceMatcher(None, n, cat_n).ratio()
+            # Score 2: token containment — quanti token del catalogo sono presenti nel nome cert?
+            # Alta quando il nome cert contiene tutti i termini significativi del catalogo
+            containment = len(ct & cat_tokens) / len(cat_tokens) if cat_tokens else 0.0
+            s = max(seq, containment)
             if s > best_score:
                 best_score, best = s, entry
         if best and best_score >= 0.80:
