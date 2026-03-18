@@ -255,7 +255,7 @@ export async function exportSearchExcel(token, params = {}) {
 }
 
 
-// ── Certification — SharePoint upload ────────────────────────────────────────
+// ── Certification — file upload / download ───────────────────────────────────
 
 export async function uploadCertDoc(token, certId, file) {
   const formData = new FormData();
@@ -273,6 +273,52 @@ export async function uploadCertDoc(token, certId, file) {
     throw new Error(body.detail || "Upload documento fallito");
   }
   return res.json();
+}
+
+export async function deleteCertDoc(token, certId) {
+  const res = await fetch(
+    `${BASE_URL}/cv/me/certifications/${certId}/upload-doc`,
+    { method: "DELETE", headers: { Authorization: `Bearer ${token}` } }
+  );
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({}));
+    throw new Error(body.detail || "Eliminazione documento fallita");
+  }
+}
+
+export function downloadCertDocUrl(token, certId) {
+  // Restituisce URL per download diretto (aperto in nuova tab)
+  return `${BASE_URL}/cv/me/certifications/${certId}/download-doc?token=${token}`;
+}
+
+export async function downloadCredlyPdf(token, certId, save = false) {
+  // Se save=false → redirect al PDF Credly (apre tab di download)
+  // Se save=true  → scarica e salva come uploaded_file_path, ritorna CertificationResponse
+  const url = `${BASE_URL}/cv/me/certifications/${certId}/credly-pdf?save=${save}`;
+  if (!save) {
+    // Apre il redirect direttamente nel browser
+    const a = document.createElement("a");
+    a.href = url;
+    a.target = "_blank";
+    a.rel = "noopener noreferrer";
+    // Aggiungi auth header manualmente tramite fetch+blob
+    const res = await fetch(url, { headers: { Authorization: `Bearer ${token}` } });
+    if (!res.ok) {
+      const body = await res.json().catch(() => ({}));
+      throw new Error(body.detail || "Download PDF Credly fallito");
+    }
+    const blob = await res.blob();
+    const blobUrl = URL.createObjectURL(blob);
+    a.href = blobUrl;
+    a.download = `credly_badge_${certId}.pdf`;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    setTimeout(() => URL.revokeObjectURL(blobUrl), 5000);
+    return null;
+  } else {
+    return apiFetch(`/cv/me/certifications/${certId}/credly-pdf?save=true`, {}, token);
+  }
 }
 
 // ── Certification — Credly ────────────────────────────────────────────────────

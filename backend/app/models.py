@@ -47,9 +47,13 @@ class LanguageLevel(str, enum.Enum):
 
 
 class AvailabilityStatus(str, enum.Enum):
+    IN_HIRING  = "IN_HIRING"   # In fase di assunzione / onboarding
+    IN_STAFF   = "IN_STAFF"    # In forza attiva
+    IN_USCITA  = "IN_USCITA"   # In uscita
+    DIMESSO    = "DIMESSO"     # Dimesso / non più in azienda
+    # Legacy — mantenuti per compatibilità DB durante migrazione
     DISPONIBILE = "DISPONIBILE"
-    OCCUPATO = "OCCUPATO"
-    IN_USCITA = "IN_USCITA"
+    OCCUPATO    = "OCCUPATO"
 
 
 class DocAttachmentType(str, enum.Enum):
@@ -107,7 +111,7 @@ class CV(Base):
     first_employment_date: Mapped[Optional[date]] = mapped_column(Date)   # prima assunzione assoluta
 
     availability_status: Mapped[AvailabilityStatus] = mapped_column(
-        Enum(AvailabilityStatus), default=AvailabilityStatus.DISPONIBILE
+        Enum(AvailabilityStatus), default=AvailabilityStatus.IN_STAFF
     )
 
     # Metadati
@@ -249,6 +253,9 @@ class Certification(Base):
     # Credly integration (Sprint 5)
     credly_badge_id: Mapped[Optional[str]] = mapped_column(String(200))    # UUID badge Credly
     badge_image_url: Mapped[Optional[str]] = mapped_column(String(1000))   # URL immagine badge
+
+    # File allegato caricato dall'utente (indipendente da doc_attachment_type)
+    uploaded_file_path: Mapped[Optional[str]] = mapped_column(String(1000))  # percorso file locale
 
     cv: Mapped["CV"] = relationship("CV", back_populates="certifications")
 

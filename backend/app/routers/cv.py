@@ -641,7 +641,7 @@ def delete_certification(
     db.commit()
 
 
-# ── Certificazioni — Upload documento (simulazione SharePoint) ────────────────
+# ── Certificazioni — Upload documento (sempre disponibile, tutti i tipi) ───────
 
 @router.post("/me/certifications/{cert_id}/upload-doc", response_model=CertificationResponse)
 async def upload_cert_doc(
@@ -651,12 +651,12 @@ async def upload_cert_doc(
     db: Session = Depends(get_db),
 ):
     """
-    Carica un documento allegato a una certificazione.
-    Simula upload SharePoint salvando in uploads/certs/{user_id}/.
-    Idempotente: sovrascrive il file precedente se stesso cert_id.
+    Carica un file allegato a una certificazione (PDF, immagine, docx — max 10 MB).
+    Disponibile per qualsiasi tipo di certificazione (Credly, URL, SharePoint, None).
+    Salva in uploads/certs/{user_id}/cert_{cert_id}.{ext}.
+    Idempotente: sovrascrive il file precedente sullo stesso cert_id.
+    NON modifica doc_attachment_type né doc_url — usa il campo uploaded_file_path.
     """
-    from app.models import DocAttachmentType
-
     cert = (
         db.query(Certification)
         .join(CV, Certification.cv_id == CV.id)
@@ -670,10 +670,12 @@ async def upload_cert_doc(
     if len(content_bytes) > 10 * 1024 * 1024:
         raise HTTPException(400, "File troppo grande (max 10 MB)")
 
-    original_name = file.filename or "document"
-    ext = os.path.splitext(original_name)[1].lower() or ".bin"
-    safe_name = f"cert_{cert_id}{ext}"
+    ext = os.path.splitext(file.filename or "doc")[1].lower() or ".bin"
+    allowed = {".pdf", ".jpg", ".jpeg", ".png", ".docx", ".doc"}
+    if ext not in allowed:
+        raise HTTPException(400, f"Formato non supportato ({ext}). Ammessi: pdf, jpg, png, docx")
 
+    safe_name = f"cert_{cert_id}{ext}"
     cert_dir = os.path.join(settings.upload_dir, "certs", str(current_user.id))
     os.makedirs(cert_dir, exist_ok=True)
 
@@ -681,13 +683,67 @@ async def upload_cert_doc(
     with open(file_path, "wb") as fh:
         fh.write(content_bytes)
 
-    simulated_url = f"/uploads/certs/{current_user.id}/{safe_name}"
-
-    cert.doc_url = simulated_url
-    cert.doc_attachment_type = DocAttachmentType.SHAREPOINT
+    cert.uploaded_file_path = f"/uploads/certs/{current_user.id}/{safe_name}"
     db.commit()
     db.refresh(cert)
     return cert
+
+
+@router.delete("/me/certifications/{cert_id}/upload-doc", status_code=204)
+def delete_cert_doc(
+    cert_id: int,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Rimuove il file allegato caricato (non cancella il record cert)."""
+    cert = (
+        db.query(Certification)
+        .join(CV, Certification.cv_id == CV.id)
+        .filter(Certification.id == cert_id, CV.user_id == current_user.id)
+        .first()
+    )
+    if not cert:
+        _404("Certificazione non trovata")
+
+    if cert.uploaded_file_path:
+        abs_path = os.path.join(
+            settings.upload_dir,
+            cert.uploaded_file_path.lstrip("/uploads/").lstrip("uploads/"),
+        )
+        if os.path.exists(abs_path):
+            os.remove(abs_path)
+        cert.uploaded_file_path = None
+        db.commit()
+
+
+@router.get("/me/certifications/{cert_id}/download-doc")
+def download_cert_doc(
+    cert_id: int,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Scarica il file allegato caricato dall'utente per una certificazione."""
+    from fastapi.responses import FileResponse
+
+    cert = (
+        db.query(Certification)
+        .join(CV, Certification.cv_id == CV.id)
+        .filter(Certification.id == cert_id, CV.user_id == current_user.id)
+        .first()
+    )
+    if not cert:
+        _404("Certificazione non trovata")
+    if not cert.uploaded_file_path:
+        raise HTTPException(404, "Nessun file allegato per questa certificazione")
+
+    # uploaded_file_path = /uploads/certs/{user_id}/cert_{id}.pdf
+    rel = cert.uploaded_file_path.lstrip("/")
+    abs_path = os.path.join("/app", rel)
+    if not os.path.exists(abs_path):
+        raise HTTPException(404, "File non trovato su disco")
+
+    filename = os.path.basename(abs_path)
+    return FileResponse(abs_path, filename=filename, media_type="application/octet-stream")
 
 
 # ── Certificazioni — Credly preview ───────────────────────────────────────────
@@ -762,6 +818,116 @@ async def credly_preview(
         })
 
     return {"username": username, "total": len(result), "badges": result}
+
+
+# ── Certificazioni — Credly PDF download ──────────────────────────────────────
+
+@router.get("/me/certifications/{cert_id}/credly-pdf")
+async def download_credly_pdf(
+    cert_id: int,
+    save: bool = Query(False, description="Se true, salva il PDF come allegato"),
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """
+    Scarica il PDF stampabile di un badge Credly.
+    Richiede che la certificazione abbia credly_badge_id valorizzato.
+    Recupera l'URL firmato dalla API pubblica Credly e redirige al download.
+    Se save=true, salva il PDF come uploaded_file_path della certificazione.
+    """
+    from fastapi.responses import RedirectResponse, StreamingResponse
+
+    cert = (
+        db.query(Certification)
+        .join(CV, Certification.cv_id == CV.id)
+        .filter(Certification.id == cert_id, CV.user_id == current_user.id)
+        .first()
+    )
+    if not cert:
+        _404("Certificazione non trovata")
+    if not cert.credly_badge_id:
+        raise HTTPException(400, "Questa certificazione non ha un badge Credly collegato")
+
+    badge_id = cert.credly_badge_id
+
+    # Prova API pubblica Credly per ottenere l'URL del PDF stampabile
+    pdf_url: Optional[str] = None
+
+    async with httpx.AsyncClient(timeout=15, follow_redirects=True) as client:
+        # Endpoint JSON pubblico del badge
+        resp = await client.get(
+            f"https://www.credly.com/badges/{badge_id}.json",
+            headers={"Accept": "application/json", "User-Agent": "Mozilla/5.0"},
+        )
+        if resp.status_code == 200:
+            try:
+                data = resp.json()
+                # Cerca URL PDF nei campi noti della risposta Credly
+                for key in ("pdf_download_url", "printable_pdf", "pdf_url"):
+                    if data.get(key):
+                        pdf_url = data[key]
+                        break
+                # Alcuni campi sono annidati
+                if not pdf_url and isinstance(data.get("data"), dict):
+                    inner = data["data"]
+                    for key in ("pdf_download_url", "printable_pdf", "pdf_url"):
+                        if inner.get(key):
+                            pdf_url = inner[key]
+                            break
+            except Exception:
+                pass
+
+        # Fallback: endpoint API ufficiale Credly
+        if not pdf_url:
+            resp2 = await client.get(
+                f"https://api.credly.com/v1/badges/{badge_id}",
+                headers={"Accept": "application/json", "User-Agent": "Mozilla/5.0"},
+            )
+            if resp2.status_code == 200:
+                try:
+                    data2 = resp2.json()
+                    badge_data = data2.get("data", data2)
+                    for key in ("pdf_download_url", "printable_pdf", "pdf_url"):
+                        if badge_data.get(key):
+                            pdf_url = badge_data[key]
+                            break
+                except Exception:
+                    pass
+
+        if not pdf_url:
+            raise HTTPException(
+                502,
+                "Impossibile ottenere il PDF da Credly. "
+                "Il badge potrebbe non avere un PDF stampabile disponibile."
+            )
+
+        if save:
+            # Scarica e salva come uploaded_file_path
+            pdf_resp = await client.get(pdf_url, headers={"User-Agent": "Mozilla/5.0"})
+            if pdf_resp.status_code != 200:
+                raise HTTPException(502, "Download PDF da Credly fallito")
+
+            cert_dir = os.path.join(settings.upload_dir, "certs", str(current_user.id))
+            os.makedirs(cert_dir, exist_ok=True)
+            file_name = f"cert_{cert_id}_credly.pdf"
+            file_path = os.path.join(cert_dir, file_name)
+            with open(file_path, "wb") as fh:
+                fh.write(pdf_resp.content)
+
+            cert.uploaded_file_path = f"/uploads/certs/{current_user.id}/{file_name}"
+            db.commit()
+            db.refresh(cert)
+
+            # Restituisce il file direttamente
+            import io
+            return StreamingResponse(
+                io.BytesIO(pdf_resp.content),
+                media_type="application/pdf",
+                headers={"Content-Disposition": f'attachment; filename="{file_name}"'},
+            )
+
+    # Redirect diretto all'URL firmato Credly (download immediato senza salvare)
+    return RedirectResponse(url=pdf_url, status_code=302)
 
 
 # ── Certificazioni — Credly import ────────────────────────────────────────────

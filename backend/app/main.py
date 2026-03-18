@@ -46,7 +46,30 @@ def ensure_schema_compatibility() -> None:
         conn.execute(text(
             "ALTER TABLE certifications ADD COLUMN IF NOT EXISTS badge_image_url VARCHAR(1000)"
         ))
+
+        # Sprint 6 — uploaded_file_path su certifications
+        conn.execute(text(
+            "ALTER TABLE certifications ADD COLUMN IF NOT EXISTS uploaded_file_path VARCHAR(1000)"
+        ))
+
         conn.commit()
+
+    # Sprint 6 — nuovi valori AvailabilityStatus
+    # ALTER TYPE ADD VALUE richiede AUTOCOMMIT (non può stare in una transazione)
+    with engine.connect().execution_options(isolation_level="AUTOCOMMIT") as ac:
+        for val in ("IN_HIRING", "IN_STAFF", "DIMESSO"):
+            try:
+                ac.execute(text(f"ALTER TYPE availabilitystatus ADD VALUE IF NOT EXISTS '{val}'"))
+            except Exception:
+                pass  # già presente
+
+    # Sprint 6 — migra vecchi valori → nuovi (connessione separata post-commit enum)
+    with engine.connect() as conn3:
+        conn3.execute(text(
+            "UPDATE cvs SET availability_status = 'IN_STAFF'::availabilitystatus "
+            "WHERE availability_status::text IN ('DISPONIBILE', 'OCCUPATO')"
+        ))
+        conn3.commit()
 
 
 

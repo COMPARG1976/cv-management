@@ -11,7 +11,8 @@ import {
   addLanguage, updateLanguage, deleteLanguage,
   addReference, updateReference, deleteReference,
   addCertification, updateCertification, deleteCertification,
-  uploadCertDoc, previewCredlyBadges, importCredlyBadges,
+  uploadCertDoc, deleteCertDoc, downloadCertDocUrl, downloadCredlyPdf,
+  previewCredlyBadges, importCredlyBadges,
   searchCertCatalog, suggestCertCodes,
   getSkillSuggestions, getCertSuggestions,
   uploadCV, applyDiff, getCVHints,
@@ -30,7 +31,16 @@ const VIEWS = {
 const SKILL_CATEGORIES = ["HARD", "SOFT"];
 const DEGREE_LEVELS    = ["DIPLOMA", "TRIENNALE", "MAGISTRALE", "DOTTORATO", "MASTER", "CORSO"];
 const LANGUAGE_LEVELS  = ["A1", "A2", "B1", "B2", "C1", "C2", "MADRELINGUA"];
-const AVAIL_OPTIONS    = ["DISPONIBILE", "OCCUPATO", "IN_USCITA"];
+const AVAIL_OPTIONS    = ["IN_HIRING", "IN_STAFF", "IN_USCITA", "DIMESSO"];
+const AVAIL_LABELS     = {
+  IN_HIRING:  "In Hiring",
+  IN_STAFF:   "In Staff",
+  IN_USCITA:  "In Uscita",
+  DIMESSO:    "Dimesso",
+  // legacy
+  DISPONIBILE: "Disponibile",
+  OCCUPATO:    "Occupato",
+};
 
 // ── Helper Components ─────────────────────────────────────────────────────────
 
@@ -478,7 +488,7 @@ function AnagraficaTab({ token, cv, setCV, hints = {} }) {
     birth_place:           cv.birth_place          || "",
     residence_city:        cv.residence_city       || "",
     first_employment_date: cv.first_employment_date || "",
-    availability_status:   cv.availability_status  || "DISPONIBILE",
+    availability_status:   cv.availability_status  || "IN_STAFF",
     hire_date_mashfrog:    cv.hire_date_mashfrog   || "",
     mashfrog_office:       cv.mashfrog_office      || "",
     bu_mashfrog:           cv.bu_mashfrog          || "",
@@ -567,7 +577,7 @@ function AnagraficaTab({ token, cv, setCV, hints = {} }) {
           <dt style={dt}>Disponibilità</dt>
           <dd>
             <span className={`badge badge--${cv.availability_status?.toLowerCase()}`}>
-              {cv.availability_status}
+              {AVAIL_LABELS[cv.availability_status] || cv.availability_status}
             </span>
           </dd>
 
@@ -631,7 +641,7 @@ function AnagraficaTab({ token, cv, setCV, hints = {} }) {
             <div className="form-group">
               <label>Disponibilità</label>
               <select value={form.availability_status} onChange={e => upd("availability_status", e.target.value)}>
-                {AVAIL_OPTIONS.map(o => <option key={o} value={o}>{o}</option>)}
+                {AVAIL_OPTIONS.map(o => <option key={o} value={o}>{AVAIL_LABELS[o]}</option>)}
               </select>
             </div>
           </div>
@@ -1152,6 +1162,7 @@ function CertificazioniTab({ token, cv, setCV, hints = {} }) {
   const [error, setError]         = useState("");
   const [uploadFile, setUploadFile] = useState(null);
   const [uploading, setUploading] = useState(false);
+  const [credlyPdfLoading, setCredlyPdfLoading] = useState({});  // {cert_id: bool}
 
   // Credly import state
   const [credlyModal, setCredlyModal]       = useState(false);
@@ -1238,8 +1249,8 @@ function CertificazioniTab({ token, cv, setCV, hints = {} }) {
         setCV(prev => ({ ...prev, certifications: prev.certifications.map(c => c.id === cert.id ? cert : c) }));
       }
 
-      // Se SHAREPOINT e file selezionato → upload
-      if (form.doc_attachment_type === "SHAREPOINT" && uploadFile) {
+      // Upload file allegato — disponibile per qualsiasi tipo di cert
+      if (uploadFile) {
         setUploading(true);
         try {
           const updatedCert = await uploadCertDoc(token, cert.id, uploadFile);
@@ -1269,6 +1280,37 @@ function CertificazioniTab({ token, cv, setCV, hints = {} }) {
     try {
       await deleteCertification(token, id);
       setCV(prev => ({ ...prev, certifications: prev.certifications.filter(c => c.id !== id) }));
+    } catch (e) {
+      setError(e.message);
+    }
+  }
+
+  async function handleCredlyPdf(certId, save = false) {
+    setCredlyPdfLoading(prev => ({ ...prev, [certId]: true }));
+    try {
+      const updated = await downloadCredlyPdf(token, certId, save);
+      if (save && updated) {
+        setCV(prev => ({
+          ...prev,
+          certifications: prev.certifications.map(c => c.id === updated.id ? updated : c),
+        }));
+      }
+    } catch (e) {
+      setError(e.message);
+    } finally {
+      setCredlyPdfLoading(prev => ({ ...prev, [certId]: false }));
+    }
+  }
+
+  async function handleDeleteCertDoc(certId) {
+    try {
+      await deleteCertDoc(token, certId);
+      setCV(prev => ({
+        ...prev,
+        certifications: prev.certifications.map(c =>
+          c.id === certId ? { ...c, uploaded_file_path: null } : c
+        ),
+      }));
     } catch (e) {
       setError(e.message);
     }
@@ -1358,12 +1400,56 @@ function CertificazioniTab({ token, cv, setCV, hints = {} }) {
                   {c.year       && <span> · {c.year}</span>}
                   {c.cert_code  && <span> · {c.cert_code}</span>}
                   {c.expiry_date && <span> · Scade: <DateStr value={c.expiry_date} /></span>}
-                  {c.doc_url && (
+                  {c.doc_url && c.doc_attachment_type !== "SHAREPOINT" && (
                     <span> · <a href={c.doc_url} target="_blank" rel="noopener noreferrer">
-                      {c.doc_attachment_type === "SHAREPOINT" ? "Documento" :
-                       c.doc_attachment_type === "CREDLY"     ? "Verifica badge" :
-                                                                "Verifica"}
+                      {c.doc_attachment_type === "CREDLY" ? "Verifica badge" : "Verifica"}
                     </a></span>
+                  )}
+                </div>
+                {/* ── Azioni allegati ── */}
+                <div style={{ display: "flex", flexWrap: "wrap", gap: 6, marginTop: 6 }}>
+                  {/* File caricato dall'utente */}
+                  {c.uploaded_file_path && (
+                    <>
+                      <a
+                        href={`/api/cv/me/certifications/${c.id}/download-doc`}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="btn btn-secondary btn-sm"
+                        style={{ fontSize: 11 }}
+                      >
+                        ⬇ Allegato
+                      </a>
+                      <button
+                        className="btn btn-secondary btn-sm"
+                        style={{ fontSize: 11 }}
+                        onClick={() => handleDeleteCertDoc(c.id)}
+                      >
+                        🗑 Rimuovi allegato
+                      </button>
+                    </>
+                  )}
+                  {/* Download PDF da Credly */}
+                  {c.credly_badge_id && (
+                    <button
+                      className="btn btn-secondary btn-sm"
+                      style={{ fontSize: 11 }}
+                      disabled={credlyPdfLoading[c.id]}
+                      onClick={() => handleCredlyPdf(c.id, false)}
+                    >
+                      {credlyPdfLoading[c.id] ? "…" : "⬇ PDF Credly"}
+                    </button>
+                  )}
+                  {c.credly_badge_id && (
+                    <button
+                      className="btn btn-secondary btn-sm"
+                      style={{ fontSize: 11 }}
+                      disabled={credlyPdfLoading[c.id]}
+                      onClick={() => handleCredlyPdf(c.id, true)}
+                      title="Scarica da Credly e salva come allegato"
+                    >
+                      {credlyPdfLoading[c.id] ? "…" : "💾 Salva PDF Credly"}
+                    </button>
                   )}
                 </div>
                 {(() => {
@@ -1544,38 +1630,28 @@ function CertificazioniTab({ token, cv, setCV, hints = {} }) {
             </div>
           )}
 
-          {/* File upload per SHAREPOINT */}
-          {form.doc_attachment_type === "SHAREPOINT" && (
-            <div className="form-group">
-              <label>Documento da allegare (SharePoint)</label>
-              {form.doc_url && !uploadFile && (
-                <div style={{ fontSize: 12, color: "var(--color-text-muted)", marginBottom: 4 }}>
-                  Documento attuale: <em>{form.doc_url.split("/").pop()}</em>
-                  {" — "}carica un nuovo file per sostituirlo
-                </div>
-              )}
-              <input
-                type="file"
-                accept=".pdf,.jpg,.jpeg,.png,.docx,.doc"
-                style={{ padding: "4px 0" }}
-                onChange={e => setUploadFile(e.target.files[0] || null)}
-              />
-              {uploadFile && (
-                <div style={{ fontSize: 12, color: "var(--color-success)", marginTop: 4 }}>
-                  Pronto: {uploadFile.name} ({(uploadFile.size / 1024).toFixed(0)} KB)
-                </div>
-              )}
-              {uploading && <div style={{ fontSize: 12, color: "var(--color-primary)" }}>Caricamento in corso...</div>}
-            </div>
-          )}
-
-          {/* File locale solo per NONE */}
-          {form.doc_attachment_type === "NONE" && (
-            <div className="form-group">
-              <label>Carica certificato (anteprima locale, non salvato)</label>
-              <input type="file" accept=".pdf,.jpg,.png" style={{ padding: "4px 0" }} />
-            </div>
-          )}
+          {/* File allegato — sempre disponibile */}
+          <div className="form-group">
+            <label>Allega file certificato (PDF, immagine, Word — max 10 MB)</label>
+            {modal?.item?.uploaded_file_path && !uploadFile && (
+              <div style={{ fontSize: 12, color: "var(--color-text-muted)", marginBottom: 4 }}>
+                File attuale: <em>{modal.item.uploaded_file_path.split("/").pop()}</em>
+                {" — "}carica un nuovo file per sostituirlo
+              </div>
+            )}
+            <input
+              type="file"
+              accept=".pdf,.jpg,.jpeg,.png,.docx,.doc"
+              style={{ padding: "4px 0" }}
+              onChange={e => setUploadFile(e.target.files[0] || null)}
+            />
+            {uploadFile && (
+              <div style={{ fontSize: 12, color: "var(--color-success)", marginTop: 4 }}>
+                Pronto: {uploadFile.name} ({(uploadFile.size / 1024).toFixed(0)} KB)
+              </div>
+            )}
+            {uploading && <div style={{ fontSize: 12, color: "var(--color-primary)" }}>Caricamento in corso...</div>}
+          </div>
 
           <div className="form-group">
             <label>Note</label>

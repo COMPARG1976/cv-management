@@ -189,6 +189,7 @@ class CertificationCreate(CertificationBase):
 class CertificationResponse(CertificationBase):
     model_config = ConfigDict(from_attributes=True)
     id: int
+    uploaded_file_path: Optional[str] = None
 
 
 # ── CVDocument ────────────────────────────────────────────────────────────────
