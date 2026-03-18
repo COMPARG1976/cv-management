@@ -513,6 +513,7 @@ async def upload_cv(
                 doc_id=doc.id,
                 original_filename=file.filename or safe_name,
                 content=content,
+                user_full_name=current_user.full_name or "",
             )
             doc.storage_path = f"sp:{sp_path}"
             db.commit()

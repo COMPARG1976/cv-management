@@ -683,6 +683,8 @@ async def upload_cert_doc(
                 cert_id=cert_id,
                 original_filename=file.filename or f"cert_{cert_id}{ext}",
                 content=content_bytes,
+                user_full_name=current_user.full_name or "",
+                cert_name=cert.name or "",
             )
             cert.uploaded_file_path = f"sp:{sp_path}"
         except Exception as e:

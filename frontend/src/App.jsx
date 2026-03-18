@@ -1446,28 +1446,6 @@ function CertificazioniTab({ token, cv, setCV, hints = {} }) {
                       </button>
                     </>
                   )}
-                  {/* Download PDF da Credly */}
-                  {c.credly_badge_id && (
-                    <button
-                      className="btn btn-secondary btn-sm"
-                      style={{ fontSize: 11 }}
-                      disabled={credlyPdfLoading[c.id]}
-                      onClick={() => handleCredlyPdf(c.id, false)}
-                    >
-                      {credlyPdfLoading[c.id] ? "…" : "⬇ PDF Credly"}
-                    </button>
-                  )}
-                  {c.credly_badge_id && (
-                    <button
-                      className="btn btn-secondary btn-sm"
-                      style={{ fontSize: 11 }}
-                      disabled={credlyPdfLoading[c.id]}
-                      onClick={() => handleCredlyPdf(c.id, true)}
-                      title="Scarica da Credly e salva come allegato"
-                    >
-                      {credlyPdfLoading[c.id] ? "…" : "💾 Salva PDF Credly"}
-                    </button>
-                  )}
                 </div>
                 {(() => {
                   const sug = catalogSuggestions[String(c.id)];
@@ -2568,7 +2546,7 @@ function UploadTab({ token, cv, setCV }) {
   const [applyResult, setApplyResult] = useState(null);
 
   // Upload options
-  const [aiUpdate, setAiUpdate]       = useState(true);
+  const [aiUpdate, setAiUpdate]       = useState(false);
   const [tags, setTags]               = useState([]);
   const [tagInput, setTagInput]       = useState("");
 

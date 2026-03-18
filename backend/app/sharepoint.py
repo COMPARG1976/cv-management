@@ -117,6 +117,13 @@ async def _get_drive_id() -> str:
     )
 
 
+def _sanitize(text: str, max_len: int = 40) -> str:
+    """Rimuove caratteri non validi per nomi file SharePoint, sostituisce spazi con _, tronca."""
+    s = re.sub(r'[<>:"/\\|?*\x00-\x1f ]', "_", text.strip())
+    s = re.sub(r"_+", "_", s).strip("_")
+    return s[:max_len]
+
+
 def _sp_path(user_email: str, subfolder: str, filename: str) -> str:
     """
     Costruisce il path relativo alla root del drive.
@@ -132,13 +139,18 @@ async def upload_cv_file(
     doc_id: int,
     original_filename: str,
     content: bytes,
+    user_full_name: str = "",
 ) -> str:
     """
     Carica un file CV su SharePoint nella cartella CV dell'utente.
+    Nome file: CV_NomeCognome_YYYY-MM_<id>.ext  — leggibile in SharePoint.
     Ritorna il path relativo nel drive (senza prefisso 'sp:').
     """
+    import datetime
     ext = original_filename.rsplit(".", 1)[-1].lower() if "." in original_filename else "bin"
-    safe_name = f"cv_{doc_id}.{ext}"
+    ym  = datetime.date.today().strftime("%Y-%m")
+    name_part = _sanitize(user_full_name, 30) if user_full_name else _sanitize(user_email.split("@")[0], 30)
+    safe_name = f"CV_{name_part}_{ym}_{doc_id}.{ext}"
     path = _sp_path(user_email, "CV", safe_name)
 
     token    = await _get_token()
@@ -164,14 +176,19 @@ async def upload_cert_file(
     cert_id: int,
     original_filename: str,
     content: bytes,
+    user_full_name: str = "",
+    cert_name: str = "",
 ) -> str:
     """
     Carica un file certificato su SharePoint.
+    Nome file: CERT_NomeCognome_NomeCert_<id>.ext  — leggibile in SharePoint.
     Ritorna il path relativo nel drive (senza prefisso 'sp:').
     Crea automaticamente le cartelle intermedie se non esistono (Graph lo fa in automatico).
     """
     ext = original_filename.rsplit(".", 1)[-1].lower() if "." in original_filename else "bin"
-    safe_name = f"cert_{cert_id}.{ext}"
+    name_part = _sanitize(user_full_name, 25) if user_full_name else _sanitize(user_email.split("@")[0], 25)
+    cert_part = _sanitize(cert_name, 40) if cert_name else f"cert_{cert_id}"
+    safe_name = f"CERT_{name_part}_{cert_part}_{cert_id}.{ext}"
     path = _sp_path(user_email, "Certificazioni", safe_name)
 
     token    = await _get_token()
