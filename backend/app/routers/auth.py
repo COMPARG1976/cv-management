@@ -104,10 +104,11 @@ async def _fetch_jwks() -> dict:
 async def _verify_id_token(id_token: str) -> dict:
     """
     Verifica la firma RS256 dell'id_token usando JWKS Microsoft.
-    audience: entra_audience da config oppure client_id di default.
-    """
-    audience = settings.entra_audience or settings.entra_client_id
 
+    L'id_token ha sempre aud = client_id (senza prefisso api://).
+    Il prefisso api:// è usato solo negli access_token per API custom.
+    Prova in ordine: client_id, entra_audience (se configurato), nessuna verifica aud.
+    """
     try:
         header = jose_jwt.get_unverified_header(id_token)
     except JWTError as e:
@@ -120,18 +121,27 @@ async def _verify_id_token(id_token: str) -> dict:
     if not key:
         raise HTTPException(401, f"Chiave pubblica (kid={kid}) non trovata nel JWKS Microsoft")
 
-    try:
-        payload = jose_jwt.decode(
-            id_token,
-            key,
-            algorithms=["RS256"],
-            audience=audience,
-            options={"verify_exp": True, "verify_aud": True},
-        )
-    except JWTError as e:
-        raise HTTPException(401, f"Token Entra non valido: {e}")
+    # Candidati audience da provare in ordine
+    audiences_to_try: list = [settings.entra_client_id]
+    if settings.entra_audience and settings.entra_audience != settings.entra_client_id:
+        audiences_to_try.append(settings.entra_audience)
 
-    return payload
+    last_error: str = ""
+    for aud in audiences_to_try:
+        try:
+            payload = jose_jwt.decode(
+                id_token,
+                key,
+                algorithms=["RS256"],
+                audience=aud,
+                options={"verify_exp": True, "verify_aud": True},
+            )
+            return payload
+        except JWTError as e:
+            last_error = str(e)
+            continue
+
+    raise HTTPException(401, f"Token Entra non valido: {last_error}")
 
 
 def _find_or_create_user(claims: dict, db: Session) -> User:
