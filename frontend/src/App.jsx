@@ -1429,7 +1429,7 @@ function CertificazioniTab({ token, cv, setCV, hints = {} }) {
                   {c.uploaded_file_path && (
                     <>
                       <a
-                        href={`/api/cv/me/certifications/${c.id}/download-doc`}
+                        href={`/api/cv/me/certifications/${c.id}/download-doc?token=${token}`}
                         target="_blank"
                         rel="noopener noreferrer"
                         className="btn btn-secondary btn-sm"

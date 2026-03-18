@@ -6,7 +6,7 @@ import re
 from typing import List, Dict, Any, Optional
 
 import httpx
-from fastapi import APIRouter, Depends, HTTPException, Query, UploadFile, File, status
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, UploadFile, File, status
 from fastapi.responses import RedirectResponse
 
 import app.excel_store as store
@@ -384,10 +384,38 @@ async def delete_cert_doc(cert_id: str, current_user: dict = Depends(get_current
 
 
 @router.get("/me/certifications/{cert_id}/download-doc")
-async def download_cert_doc(cert_id: str, current_user: dict = Depends(get_current_user)):
+async def download_cert_doc(
+    cert_id: str,
+    request: Request,
+    token: Optional[str] = Query(default=None, include_in_schema=False),
+):
+    """
+    Scarica l'allegato di una certificazione.
+    Supporta il token sia nell'header Authorization sia come query param ?token=
+    (necessario quando il browser apre un link diretto senza poter inviare headers).
+    """
     from fastapi.responses import FileResponse
-    email = current_user["email"]
-    cert  = next((c for c in store.get_certifications(email) if c["id"] == cert_id), None)
+    from app.security import decode_token
+
+    # Leggi il token dall'header Authorization oppure dal query param
+    auth_header = request.headers.get("Authorization", "")
+    if auth_header.startswith("Bearer "):
+        jwt = auth_header[7:]
+    elif token:
+        jwt = token
+    else:
+        raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Non autenticato")
+
+    try:
+        claims = decode_token(jwt)
+    except Exception:
+        raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Token non valido")
+
+    email = claims.get("sub")
+    if not email or not store.get_user(email):
+        raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Utente non trovato")
+
+    cert = next((c for c in store.get_certifications(email) if c["id"] == cert_id), None)
     if not cert:
         _404("Certificazione non trovata")
     fp = cert.get("uploaded_file_path", "")
