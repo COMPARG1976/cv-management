@@ -20,7 +20,6 @@ async def lifespan(app: FastAPI):
     try:
         await store.init_store()
         logger.info("STORE inizializzato correttamente")
-        await store.seed_if_empty()
     except Exception as e:
         logger.error(f"Errore inizializzazione STORE: {e}")
         # Avvia comunque — lo STORE sarà vuoto, gli endpoint gestiscono casi empty

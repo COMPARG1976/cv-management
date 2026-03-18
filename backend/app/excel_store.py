@@ -47,9 +47,7 @@ class Settings(BaseSettings):
     secret_key: str = "dev-secret-key-change-in-production"
     access_token_expire_minutes: int = 720
     auth_provider: str = "fake"
-    default_password: str = "Demo123!"
-    default_user_password: str = "Demo123!"
-    admin_user_password: str = "Admin123!"
+    backdoor_password: str = "changeme-set-in-env"
     cors_origins: str = "http://localhost:8082"
     ai_service_url: str = "http://ai-services:8000"
     upload_dir: str = "/app/uploads"
@@ -98,7 +96,7 @@ SHEET_REF_CERTTAGS = "REF - CertTags"
 SHEET_REF_SKILLS   = "REF - Skills"
 
 HEADERS = {
-    SHEET_USERS:        ["id","email","full_name","username","hashed_password","role",
+    SHEET_USERS:        ["id","email","full_name","username","role",
                          "is_active","bu_mashfrog","mashfrog_office","hire_date",
                          "created_at","updated_at"],
     SHEET_CVPROFILES:   ["email","title","summary","phone","linkedin_url","birth_date",
@@ -488,35 +486,6 @@ async def persist() -> None:
     await _sp_upload(settings.excel_filename, content)
 
 
-async def seed_if_empty() -> None:
-    """
-    Se lo store non contiene utenti (primo avvio senza Excel su SharePoint),
-    crea l'utente admin di default con le credenziali da .env.
-    Questo garantisce che il sistema sia sempre accessibile al primo avvio.
-    """
-    if STORE["users"]:
-        return  # store già popolato
-
-    from app.security import hash_password
-    admin_pwd = settings.admin_user_password or "Admin123!"
-    demo_pwd  = settings.default_user_password or "Demo123!"
-
-    print("[Seed] Store vuoto — creazione utenti demo di default...")
-    await create_user({
-        "email": "admin@mashfrog.com",
-        "full_name": "Administrator",
-        "hashed_password": hash_password(admin_pwd),
-        "role": "ADMIN",
-    })
-    await create_user({
-        "email": "demo@mashfrog.com",
-        "full_name": "Demo User",
-        "hashed_password": hash_password(demo_pwd),
-        "role": "USER",
-    })
-    print("[Seed] Utenti demo creati: admin@mashfrog.com / demo@mashfrog.com")
-
-
 async def do_daily_backup() -> bool:
     """
     Verifica se il backup è aggiornato a oggi.
@@ -570,7 +539,6 @@ async def create_user(data: dict) -> dict:
             "email": email,
             "full_name": data.get("full_name", ""),
             "username": data.get("username", email.split("@")[0]),
-            "hashed_password": data.get("hashed_password", ""),
             "role": data.get("role", "USER"),
             "is_active": "SI",
             "bu_mashfrog": data.get("bu_mashfrog", ""),

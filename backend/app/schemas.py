@@ -43,7 +43,7 @@ class UserBase(BaseModel):
 
 
 class UserCreate(UserBase):
-    password: str
+    pass
 
 
 class UserUpdate(BaseModel):
@@ -53,7 +53,6 @@ class UserUpdate(BaseModel):
     bu_mashfrog: Optional[str] = None
     mashfrog_office: Optional[str] = None
     hire_date_mashfrog: Optional[date] = None
-    password: Optional[str] = None
 
 
 class UserResponse(BaseModel):

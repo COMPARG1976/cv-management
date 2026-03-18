@@ -7,7 +7,6 @@ from fastapi import APIRouter, Depends, HTTPException, status
 import app.excel_store as store
 from app.deps import get_current_user, require_roles
 from app.schemas import UserCreate, UserUpdate, UserResponse
-from app.security import hash_password
 
 router = APIRouter()
 
@@ -48,7 +47,6 @@ async def create_user(data: UserCreate, _: dict = Depends(require_roles("ADMIN")
         "email": data.email,
         "full_name": data.full_name,
         "username": data.username or data.email.split("@")[0],
-        "hashed_password": hash_password(data.password),
         "role": data.role or "USER",
         "bu_mashfrog": data.bu_mashfrog or "",
         "mashfrog_office": data.mashfrog_office or "",
@@ -84,9 +82,6 @@ async def update_user(
         updates["mashfrog_office"] = data.mashfrog_office
     if data.hire_date_mashfrog is not None:
         updates["hire_date"] = str(data.hire_date_mashfrog)
-    if data.password is not None:
-        updates["hashed_password"] = hash_password(data.password)
-
     u = await store.update_user(email, updates)
     return _to_response(u)
 

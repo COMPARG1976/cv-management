@@ -25,7 +25,7 @@ from typing import Optional
 
 import httpx
 
-from app.database import settings
+from app.excel_store import settings
 
 logger = logging.getLogger(__name__)
 

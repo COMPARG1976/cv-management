@@ -13,7 +13,7 @@ from jose import jwt as jose_jwt, JWTError
 
 import app.excel_store as store
 from app.excel_store import settings
-from app.security import verify_password, create_access_token, hash_password
+from app.security import create_access_token
 from app.schemas import TokenResponse, AuthConfig, EntraExchangeRequest
 
 router = APIRouter()
@@ -23,6 +23,12 @@ router = APIRouter()
 
 @router.post("/login", response_model=TokenResponse)
 async def login(form_data: OAuth2PasswordRequestForm = Depends()):
+    """
+    Login locale — backdoor amministrativa.
+    Funziona con la password unica BACKDOOR_PASSWORD configurata in .env.
+    Valida per qualsiasi utente presente nello STORE.
+    Per uso quotidiano l'accesso avviene tramite SSO Microsoft Entra ID.
+    """
     login_id = form_data.username.lower().strip()
 
     # Cerca per email o username
@@ -31,7 +37,8 @@ async def login(form_data: OAuth2PasswordRequestForm = Depends()):
     if not user or user.get("is_active", "SI").upper() not in ("SI", "TRUE", "1"):
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Credenziali non valide")
 
-    if not verify_password(form_data.password, user.get("hashed_password", "")):
+    # Backdoor: password unica per tutti gli utenti (non per produzione come auth primaria)
+    if not secrets.compare_digest(form_data.password, settings.backdoor_password):
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Credenziali non valide")
 
     # Backup giornaliero: controlla e aggiorna se necessario (non bloccante)
@@ -139,11 +146,9 @@ async def _find_or_create_user(claims: dict) -> dict:
     user = store.get_user(email)
     if not user:
         full_name = claims.get("name") or email.split("@")[0].replace(".", " ").title()
-        temp_pwd = _generate_temp_password()
         user = await store.create_user({
             "email": email,
             "full_name": full_name,
-            "hashed_password": hash_password(temp_pwd),
             "role": "USER",
         })
     return user
