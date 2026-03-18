@@ -3,14 +3,16 @@ Router /upload — Sprint 3.
 POST /cv    : carica file, chiama AI service, calcola diff con DB, restituisce risultato
 POST /apply : applica le modifiche selezionate dall'utente
 """
+import json
 import os
 import uuid
 from datetime import datetime, date
 from difflib import SequenceMatcher
-from typing import Optional, Any
+from typing import Optional, Any, List
 
 import httpx
-from fastapi import APIRouter, Depends, HTTPException, UploadFile, File
+from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Form
+from fastapi.responses import FileResponse, RedirectResponse
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, selectinload
 
@@ -446,14 +448,18 @@ def compute_diff(cv: CV, ai: dict) -> dict:
 @router.post("/cv")
 async def upload_cv(
     file: UploadFile = File(...),
+    ai_update: bool = Form(True),
+    tags: str = Form("[]"),          # JSON array come stringa: '["CLIENTE X","Gara Y"]'
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
     """
-    Carica file CV (PDF/DOCX), chiama AI service, calcola diff con i dati nel DB.
-    Restituisce il diff completo pronto per la revisione dell'utente.
+    Carica file CV (PDF/DOCX).
+    - Salva sempre il file (SharePoint se configurato, altrimenti locale).
+    - Se ai_update=True: chiama AI service, calcola diff, restituisce risultato per revisione.
+    - Se ai_update=False: salva solo il file, restituisce {document_id, ai_updated: false}.
+    - tags: lista libera per classificazione (es. ["CLIENTE X", "Gara Y"]).
     """
-    # Validate extension
     ext = os.path.splitext(file.filename or "")[1].lower()
     if ext not in ALLOWED_EXTENSIONS:
         raise HTTPException(400, f"Formato non supportato: {ext}. Usa PDF o DOCX.")
@@ -462,7 +468,14 @@ async def upload_cv(
     if len(content) > settings.max_upload_size_mb * 1024 * 1024:
         raise HTTPException(400, f"File troppo grande (max {settings.max_upload_size_mb} MB).")
 
-    # Save file to shared volume
+    try:
+        tags_list: List[str] = json.loads(tags) if tags else []
+        if not isinstance(tags_list, list):
+            tags_list = []
+    except Exception:
+        tags_list = []
+
+    # Salva il file su disco locale (necessario per AI service che legge da volume)
     os.makedirs(settings.upload_dir, exist_ok=True)
     safe_name = f"{uuid.uuid4().hex}{ext}"
     file_path  = os.path.join(settings.upload_dir, safe_name)
@@ -476,20 +489,49 @@ async def upload_cv(
         db.add(cv)
         db.flush()
 
-    # Create CVDocument record
+    # Crea il record CVDocument
     doc = CVDocument(
         cv_id=cv.id,
         original_filename=file.filename or safe_name,
+        storage_path=f"/uploads/{safe_name}",     # path locale temporaneo
         mime_type=file.content_type or "application/octet-stream",
         file_size_bytes=len(content),
-        parse_status="processing",
+        tags=tags_list if tags_list else None,
+        parse_status="processing" if ai_update else "skipped",
         uploaded_by_id=current_user.id,
     )
     db.add(doc)
     db.commit()
     db.refresh(doc)
 
-    # Call AI service (synchronous wait, up to 120s)
+    # Upload su SharePoint (sovrascrive il path locale con sp:...)
+    if settings.sharepoint_enabled:
+        from app.sharepoint import upload_cv_file
+        try:
+            sp_path = await upload_cv_file(
+                user_email=current_user.email,
+                doc_id=doc.id,
+                original_filename=file.filename or safe_name,
+                content=content,
+            )
+            doc.storage_path = f"sp:{sp_path}"
+            db.commit()
+        except Exception as sp_err:
+            # Non blocca — il file è già su disco locale come fallback
+            import logging
+            logging.getLogger(__name__).warning(f"SharePoint upload CV fallito: {sp_err}")
+
+    # ── Senza AI: restituisce subito ──────────────────────────────────────────
+    if not ai_update:
+        return {
+            "document_id":  doc.id,
+            "filename":     doc.original_filename,
+            "tags":         doc.tags or [],
+            "storage_path": doc.storage_path,
+            "ai_updated":   False,
+        }
+
+    # ── Con AI: chiama AI service ─────────────────────────────────────────────
     try:
         async with httpx.AsyncClient(timeout=120.0) as client:
             resp = await client.post(
@@ -508,13 +550,11 @@ async def upload_cv(
         db.commit()
         raise HTTPException(422, ai_result.get("error", "Parsing fallito"))
 
-    # Persist AI output
     doc.ai_raw_output = ai_result["data"]
     doc.parse_status  = "done"
     doc.parsed_at     = datetime.utcnow()
     db.commit()
 
-    # Load CV with all relations for diff
     cv_full = (
         db.query(CV)
         .options(
@@ -530,7 +570,114 @@ async def upload_cv(
 
     diff = compute_diff(cv_full, ai_result["data"])
     diff["document_id"] = doc.id
+    diff["ai_updated"]  = True
     return diff
+
+
+# ── Endpoint: lista documenti CV dell'utente ──────────────────────────────────
+
+@router.get("/documents")
+def list_documents(
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Restituisce la lista di tutti i CV caricati dall'utente, dal più recente."""
+    cv = db.query(CV).filter(CV.user_id == current_user.id).first()
+    if not cv:
+        return []
+    docs = (
+        db.query(CVDocument)
+        .filter(CVDocument.cv_id == cv.id)
+        .order_by(CVDocument.uploaded_at.desc())
+        .all()
+    )
+    return [
+        {
+            "id":                d.id,
+            "original_filename": d.original_filename,
+            "uploaded_at":       d.uploaded_at.isoformat() if d.uploaded_at else None,
+            "file_size_bytes":   d.file_size_bytes,
+            "tags":              d.tags or [],
+            "ai_updated":        d.ai_updated or False,
+            "parse_status":      d.parse_status,
+            "storage_path":      d.storage_path or None,
+            "has_file":          bool(d.storage_path),
+        }
+        for d in docs
+    ]
+
+
+# ── Endpoint: download documento CV ──────────────────────────────────────────
+
+@router.get("/documents/{doc_id}/download")
+async def download_document(
+    doc_id: int,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Scarica un CV caricato. Redirect su SharePoint o FileResponse locale."""
+    cv = db.query(CV).filter(CV.user_id == current_user.id).first()
+    if not cv:
+        raise HTTPException(404, "CV non trovato")
+
+    doc = db.query(CVDocument).filter(
+        CVDocument.id == doc_id, CVDocument.cv_id == cv.id
+    ).first()
+    if not doc:
+        raise HTTPException(404, "Documento non trovato")
+    if not doc.storage_path:
+        raise HTTPException(404, "File non disponibile per questo documento")
+
+    if doc.storage_path.startswith("sp:"):
+        from app.sharepoint import get_download_url
+        try:
+            url = await get_download_url(doc.storage_path[3:])
+        except Exception as e:
+            raise HTTPException(502, f"Impossibile ottenere URL da SharePoint: {e}")
+        return RedirectResponse(url)
+    else:
+        rel      = doc.storage_path.lstrip("/")
+        abs_path = os.path.join("/app", rel)
+        if not os.path.exists(abs_path):
+            raise HTTPException(404, "File non trovato su disco")
+        return FileResponse(abs_path, filename=doc.original_filename,
+                            media_type="application/octet-stream")
+
+
+# ── Endpoint: elimina documento CV ───────────────────────────────────────────
+
+@router.delete("/documents/{doc_id}", status_code=204)
+async def delete_document(
+    doc_id: int,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Elimina un CVDocument (record DB + file su SharePoint o disco)."""
+    cv = db.query(CV).filter(CV.user_id == current_user.id).first()
+    if not cv:
+        raise HTTPException(404, "CV non trovato")
+
+    doc = db.query(CVDocument).filter(
+        CVDocument.id == doc_id, CVDocument.cv_id == cv.id
+    ).first()
+    if not doc:
+        raise HTTPException(404, "Documento non trovato")
+
+    if doc.storage_path:
+        if doc.storage_path.startswith("sp:"):
+            from app.sharepoint import delete_file
+            try:
+                await delete_file(doc.storage_path[3:])
+            except Exception:
+                pass
+        else:
+            rel      = doc.storage_path.lstrip("/")
+            abs_path = os.path.join("/app", rel)
+            if os.path.exists(abs_path):
+                os.remove(abs_path)
+
+    db.delete(doc)
+    db.commit()
 
 
 # ── Endpoint: Apply diff ──────────────────────────────────────────────────────
@@ -730,6 +877,15 @@ def apply_diff(
     except IntegrityError as e:
         db.rollback()
         raise HTTPException(409, f"Conflitto dati: {str(e.orig)[:120]}") from e
+
+    # Segna il documento come "ai_updated" se almeno una modifica è stata applicata
+    if total > 0:
+        doc_id = payload.get("document_id")
+        if doc_id:
+            doc = db.get(CVDocument, doc_id)
+            if doc and doc.cv_id == cv.id:
+                doc.ai_updated = True
+                db.commit()
 
     total = sum(applied.values())
     return {"success": True, "applied_count": total, "sections": applied,

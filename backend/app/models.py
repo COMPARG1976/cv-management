@@ -257,6 +257,9 @@ class Certification(Base):
     # File allegato caricato dall'utente (indipendente da doc_attachment_type)
     uploaded_file_path: Mapped[Optional[str]] = mapped_column(String(1000))  # percorso file locale
 
+    # Tag liberi (area tematica, progetto, contesto, ...)
+    tags: Mapped[Optional[List[str]]] = mapped_column(ARRAY(String))
+
     cv: Mapped["CV"] = relationship("CV", back_populates="certifications")
 
 
@@ -269,15 +272,21 @@ class CVDocument(Base):
     cv_id: Mapped[int] = mapped_column(Integer, ForeignKey("cvs.id", ondelete="CASCADE"), nullable=False, index=True)
 
     original_filename: Mapped[str] = mapped_column(String(255), nullable=False)
-    sharepoint_url: Mapped[Optional[str]] = mapped_column(String(1000))   # URL file su SharePoint
+    storage_path: Mapped[Optional[str]] = mapped_column(String(1000))     # path locale O "sp:..." per SharePoint
+    sharepoint_url: Mapped[Optional[str]] = mapped_column(String(1000))   # URL web SharePoint (solo visualizzazione)
     mime_type: Mapped[str] = mapped_column(String(100), nullable=False)
     file_size_bytes: Mapped[Optional[int]] = mapped_column(Integer)
 
     uploaded_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
     uploaded_by_id: Mapped[Optional[int]] = mapped_column(Integer, ForeignKey("users.id", ondelete="SET NULL"))
 
+    # Classificazione libera (es. "CLIENTE XX", "Gara YYY")
+    tags: Mapped[Optional[List[str]]] = mapped_column(ARRAY(String))
+
+    # AI parsing
+    ai_updated: Mapped[bool] = mapped_column(Boolean, default=False)  # True se usato per aggiornare il CV
     parsed_at: Mapped[Optional[datetime]] = mapped_column(DateTime)
-    parse_status: Mapped[str] = mapped_column(String(50), default="pending")  # pending|processing|done|error
+    parse_status: Mapped[str] = mapped_column(String(50), default="pending")  # pending|processing|done|error|skipped
     ai_raw_output: Mapped[Optional[dict]] = mapped_column(JSONB)
 
     cv: Mapped["CV"] = relationship("CV", back_populates="documents")

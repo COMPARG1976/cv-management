@@ -16,6 +16,7 @@ import {
   searchCertCatalog, suggestCertCodes,
   getSkillSuggestions, getCertSuggestions,
   uploadCV, applyDiff, getCVHints,
+  getDocuments, downloadDocument, deleteDocument,
   listExportTemplates, exportCVDocx,
 } from "./api.js";
 
@@ -1180,7 +1181,9 @@ function CertificazioniTab({ token, cv, setCV, hints = {} }) {
     version: "", expiry_date: "", notes: "", has_formal_cert: true,
     doc_attachment_type: "NONE", doc_url: "",
     credly_badge_id: "", badge_image_url: "",
+    tags: [],
   });
+  const [tagInput, setTagInput] = useState("");
   const [form, setForm] = useState(emptyForm());
 
   useEffect(() => {
@@ -1216,7 +1219,9 @@ function CertificazioniTab({ token, cv, setCV, hints = {} }) {
       doc_url:             c.doc_url             || "",
       credly_badge_id:     c.credly_badge_id     || "",
       badge_image_url:     c.badge_image_url     || "",
+      tags:                Array.isArray(c.tags) ? c.tags : [],
     });
+    setTagInput("");
     setUploadFile(null);
     setError("");
     setModal({ mode: "edit", item: c });
@@ -1234,6 +1239,7 @@ function CertificazioniTab({ token, cv, setCV, hints = {} }) {
         cert_code:        form.cert_code   || null,
         credly_badge_id:  form.credly_badge_id  || null,
         badge_image_url:  form.badge_image_url  || null,
+        tags:             form.tags.length > 0 ? form.tags : null,
         // Se SHAREPOINT con file, il doc_url verrà sovrascritto dall'upload
         doc_url: (form.doc_attachment_type === "SHAREPOINT" && uploadFile)
           ? null
@@ -1406,6 +1412,17 @@ function CertificazioniTab({ token, cv, setCV, hints = {} }) {
                     </a></span>
                   )}
                 </div>
+                {c.tags && c.tags.length > 0 && (
+                  <div style={{ display: "flex", flexWrap: "wrap", gap: 4, marginTop: 4 }}>
+                    {c.tags.map((t, i) => (
+                      <span key={i} style={{
+                        background: "var(--color-primary-light, #e3f0ff)",
+                        color: "var(--color-primary)",
+                        borderRadius: 12, padding: "1px 8px", fontSize: 11, fontWeight: 500,
+                      }}>{t}</span>
+                    ))}
+                  </div>
+                )}
                 {/* ── Azioni allegati ── */}
                 <div style={{ display: "flex", flexWrap: "wrap", gap: 6, marginTop: 6 }}>
                   {/* File caricato dall'utente */}
@@ -1651,6 +1668,43 @@ function CertificazioniTab({ token, cv, setCV, hints = {} }) {
               </div>
             )}
             {uploading && <div style={{ fontSize: 12, color: "var(--color-primary)" }}>Caricamento in corso...</div>}
+          </div>
+
+          <div className="form-group">
+            <label>Area / Tag <span style={{ fontWeight: 400, fontSize: 12, color: "var(--color-text-muted)" }}>(premi Invio o virgola per aggiungere)</span></label>
+            <div style={{ display: "flex", flexWrap: "wrap", gap: 4, marginBottom: 6 }}>
+              {form.tags.map((t, i) => (
+                <span key={i} style={{
+                  display: "inline-flex", alignItems: "center", gap: 4,
+                  background: "var(--color-primary-light, #e3f0ff)",
+                  color: "var(--color-primary)",
+                  borderRadius: 12, padding: "2px 10px", fontSize: 12, fontWeight: 500,
+                }}>
+                  {t}
+                  <button
+                    type="button"
+                    onClick={() => upd("tags", form.tags.filter((_, j) => j !== i))}
+                    style={{ background: "none", border: "none", cursor: "pointer", padding: 0, lineHeight: 1, color: "inherit", fontSize: 14 }}
+                  >×</button>
+                </span>
+              ))}
+            </div>
+            <input
+              value={tagInput}
+              onChange={e => setTagInput(e.target.value)}
+              onKeyDown={e => {
+                if (e.key === "Enter" || e.key === ",") {
+                  e.preventDefault();
+                  const t = tagInput.trim().replace(/,$/, "");
+                  if (t && !form.tags.includes(t)) upd("tags", [...form.tags, t]);
+                  setTagInput("");
+                }
+                if (e.key === "Backspace" && !tagInput && form.tags.length > 0) {
+                  upd("tags", form.tags.slice(0, -1));
+                }
+              }}
+              placeholder="es. OpenText, SAP, Cloud..."
+            />
           </div>
 
           <div className="form-group">
@@ -2513,14 +2567,62 @@ function UploadTab({ token, cv, setCV }) {
   const [error, setError]             = useState(null);
   const [applyResult, setApplyResult] = useState(null);
 
+  // Upload options
+  const [aiUpdate, setAiUpdate]       = useState(true);
+  const [tags, setTags]               = useState([]);
+  const [tagInput, setTagInput]       = useState("");
+
+  // Document list
+  const [docs, setDocs]               = useState(null);
+  const [docsLoading, setDocsLoading] = useState(false);
+  const [docsError, setDocsError]     = useState(null);
+  const [deletingId, setDeletingId]   = useState(null);
+  const [dlError, setDlError]         = useState(null);
+
+  useEffect(() => {
+    loadDocs();
+  }, []);
+
+  async function loadDocs() {
+    setDocsLoading(true);
+    setDocsError(null);
+    try {
+      const data = await getDocuments(token);
+      setDocs(data);
+    } catch (e) {
+      setDocsError(e.message);
+    } finally {
+      setDocsLoading(false);
+    }
+  }
+
+  // Tag chip input helpers
+  function addTag(val) {
+    const t = val.trim();
+    if (t && !tags.includes(t)) setTags(prev => [...prev, t]);
+    setTagInput("");
+  }
+  function removeTag(t) { setTags(prev => prev.filter(x => x !== t)); }
+  function onTagKeyDown(e) {
+    if (e.key === "Enter" || e.key === ",") { e.preventDefault(); addTag(tagInput); }
+    if (e.key === "Backspace" && !tagInput && tags.length) removeTag(tags[tags.length - 1]);
+  }
+
   async function handleFile(file) {
     setError(null);
     setStep("processing");
     try {
-      const result = await uploadCV(token, file);
-      setDiff(result);
-      setSelections(initSelections(result));
-      setStep("review");
+      const result = await uploadCV(token, file, { aiUpdate, tags });
+      if (!aiUpdate) {
+        // File saved, no AI — go straight to success
+        setApplyResult({ message: "CV caricato con successo.", ai_updated: false });
+        await loadDocs();
+        setStep("success");
+      } else {
+        setDiff(result);
+        setSelections(initSelections(result));
+        setStep("review");
+      }
     } catch (e) {
       setError(e.message);
       setStep("upload");
@@ -2536,6 +2638,7 @@ function UploadTab({ token, cv, setCV }) {
       setApplyResult(res);
       const fresh = await getMyCV(token);
       setCV(fresh);
+      await loadDocs();
       setStep("success");
     } catch (e) {
       setError(e.message);
@@ -2544,9 +2647,32 @@ function UploadTab({ token, cv, setCV }) {
     }
   }
 
+  async function handleDelete(docId) {
+    if (!confirm("Eliminare questo documento?")) return;
+    setDeletingId(docId);
+    try {
+      await deleteDocument(token, docId);
+      setDocs(prev => prev.filter(d => d.id !== docId));
+    } catch (e) {
+      setDocsError(e.message);
+    } finally {
+      setDeletingId(null);
+    }
+  }
+
+  async function handleDownload(doc) {
+    setDlError(null);
+    try {
+      await downloadDocument(token, doc.id, doc.original_filename);
+    } catch (e) {
+      setDlError(e.message);
+    }
+  }
+
   function reset() {
     setStep("upload"); setDiff(null); setSelections(null);
     setApplyResult(null); setError(null);
+    setTags([]); setTagInput("");
   }
 
   if (step === "processing") return <ProcessingStep />;
@@ -2559,22 +2685,172 @@ function UploadTab({ token, cv, setCV }) {
   return (
     <div className="card">
       <h3 style={{marginBottom:8}}>Carica CV</h3>
-      <p style={{color:"var(--color-text-muted)",marginBottom:24}}>
-        Carica il tuo CV (PDF o DOCX). L'AI estrarrà i dati e potrai scegliere
-        campo per campo cosa aggiornare nel profilo.
+      <p style={{color:"var(--color-text-muted)",marginBottom:20}}>
+        Carica il tuo CV (PDF o DOCX). Il file viene salvato nel tuo archivio;
+        attiva <em>Aggiornamento AI</em> per estrarre i dati e aggiornare il profilo.
       </p>
-      <UploadDropZone onFile={handleFile} error={error} />
-      {(cv?.documents?.length || 0) > 0 && (
-        <div style={{marginTop:20,paddingTop:16,borderTop:"1px solid var(--color-border)"}}>
-          <p style={{fontSize:13,color:"var(--color-text-muted)",marginBottom:8}}>Documenti caricati in precedenza:</p>
-          {cv.documents.slice(0,3).map(doc => (
-            <div key={doc.id} style={{display:"flex",justifyContent:"space-between",fontSize:13,padding:"4px 0"}}>
-              <span>{doc.original_filename}</span>
-              <span style={{color:"var(--color-text-muted)"}}>{doc.parse_status}</span>
-            </div>
-          ))}
+
+      {/* ── Opzioni upload ── */}
+      <div style={{
+        background:"var(--color-bg-subtle,#f9fafb)",
+        border:"1px solid var(--color-border)",
+        borderRadius:8, padding:"14px 16px", marginBottom:20,
+      }}>
+        {/* Flag AI */}
+        <label style={{display:"flex",alignItems:"center",gap:10,cursor:"pointer",marginBottom:12}}>
+          <input
+            type="checkbox"
+            checked={aiUpdate}
+            onChange={e => setAiUpdate(e.target.checked)}
+            style={{width:16,height:16,cursor:"pointer"}}
+          />
+          <span style={{fontWeight:600}}>Aggiornamento AI</span>
+          <span style={{fontSize:12,color:"var(--color-text-muted)"}}>
+            — estrae i dati dal CV e propone aggiornamenti campo per campo
+          </span>
+        </label>
+
+        {/* Tag input */}
+        <div>
+          <label style={{fontSize:13,fontWeight:600,display:"block",marginBottom:6}}>
+            Tag classificazione
+            <span style={{fontWeight:400,color:"var(--color-text-muted)",marginLeft:6}}>
+              (es. CLIENTE XX, Gara YYY — premi Invio o virgola)
+            </span>
+          </label>
+          <div style={{
+            display:"flex",flexWrap:"wrap",gap:4,
+            border:"1px solid var(--color-border)",borderRadius:6,
+            padding:"6px 8px",background:"#fff",minHeight:38,
+            cursor:"text",
+          }}>
+            {tags.map(t => (
+              <span key={t} style={{
+                display:"inline-flex",alignItems:"center",gap:4,
+                background:"var(--color-primary,#6366f1)",color:"#fff",
+                borderRadius:4,padding:"2px 8px",fontSize:12,fontWeight:600,
+              }}>
+                {t}
+                <button onClick={() => removeTag(t)} style={{
+                  background:"none",border:"none",color:"#fff",cursor:"pointer",
+                  padding:0,fontSize:14,lineHeight:1,
+                }}>×</button>
+              </span>
+            ))}
+            <input
+              value={tagInput}
+              onChange={e => setTagInput(e.target.value)}
+              onKeyDown={onTagKeyDown}
+              onBlur={() => tagInput && addTag(tagInput)}
+              placeholder={tags.length ? "" : "Aggiungi tag…"}
+              style={{
+                border:"none",outline:"none",flex:1,minWidth:80,
+                fontSize:13,background:"transparent",
+              }}
+            />
+          </div>
         </div>
-      )}
+      </div>
+
+      <UploadDropZone onFile={handleFile} error={error} />
+
+      {/* ── Lista documenti caricati ── */}
+      <div style={{marginTop:28,paddingTop:20,borderTop:"1px solid var(--color-border)"}}>
+        <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",marginBottom:12}}>
+          <h4 style={{margin:0,fontSize:15}}>CV archiviati</h4>
+          <button
+            className="btn btn-ghost"
+            onClick={loadDocs}
+            disabled={docsLoading}
+            style={{fontSize:12,padding:"3px 10px"}}
+          >
+            {docsLoading ? "Caricamento…" : "↻ Aggiorna"}
+          </button>
+        </div>
+
+        {docsError && <div className="alert alert-error" style={{marginBottom:10}}>{docsError}</div>}
+        {dlError   && <div className="alert alert-error" style={{marginBottom:10}}>{dlError}</div>}
+
+        {docsLoading && !docs && (
+          <p style={{color:"var(--color-text-muted)",fontSize:13}}>Caricamento…</p>
+        )}
+
+        {docs && docs.length === 0 && (
+          <p style={{color:"var(--color-text-muted)",fontSize:13}}>Nessun CV ancora archiviato.</p>
+        )}
+
+        {docs && docs.length > 0 && (
+          <div style={{display:"flex",flexDirection:"column",gap:8}}>
+            {docs.map(doc => (
+              <div key={doc.id} style={{
+                display:"flex",alignItems:"flex-start",gap:12,
+                border:"1px solid var(--color-border)",borderRadius:8,
+                padding:"10px 14px",background:"#fff",
+              }}>
+                {/* Icona file */}
+                <div style={{fontSize:22,lineHeight:1,paddingTop:2}}>
+                  {doc.original_filename.endsWith(".pdf") ? "📄" : "📝"}
+                </div>
+
+                {/* Info */}
+                <div style={{flex:1,minWidth:0}}>
+                  <div style={{fontWeight:600,fontSize:14,marginBottom:2,
+                    overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>
+                    {doc.original_filename}
+                  </div>
+                  <div style={{fontSize:12,color:"var(--color-text-muted)",marginBottom:4}}>
+                    {new Date(doc.uploaded_at).toLocaleDateString("it-IT",{
+                      day:"2-digit",month:"2-digit",year:"numeric",
+                      hour:"2-digit",minute:"2-digit",
+                    })}
+                    {doc.file_size_bytes && ` · ${(doc.file_size_bytes/1024).toFixed(0)} KB`}
+                    {doc.ai_updated && (
+                      <span style={{
+                        marginLeft:8,background:"#dcfce7",color:"#166534",
+                        borderRadius:4,padding:"1px 6px",fontSize:11,fontWeight:600,
+                      }}>AI ✓</span>
+                    )}
+                    {doc.storage_path?.startsWith("sp:") && (
+                      <span style={{
+                        marginLeft:6,background:"#dbeafe",color:"#1e40af",
+                        borderRadius:4,padding:"1px 6px",fontSize:11,fontWeight:600,
+                      }}>SharePoint</span>
+                    )}
+                  </div>
+                  {/* Tags */}
+                  {doc.tags && doc.tags.length > 0 && (
+                    <div style={{display:"flex",flexWrap:"wrap",gap:4}}>
+                      {doc.tags.map(t => (
+                        <span key={t} style={{
+                          background:"#f3f4f6",color:"#374151",
+                          borderRadius:4,padding:"1px 7px",fontSize:11,fontWeight:500,
+                        }}>{t}</span>
+                      ))}
+                    </div>
+                  )}
+                </div>
+
+                {/* Azioni */}
+                <div style={{display:"flex",gap:6,flexShrink:0}}>
+                  <button
+                    className="btn btn-ghost"
+                    onClick={() => handleDownload(doc)}
+                    style={{fontSize:12,padding:"4px 10px"}}
+                    title="Scarica"
+                  >⬇ Scarica</button>
+                  <button
+                    className="btn btn-danger"
+                    onClick={() => handleDelete(doc.id)}
+                    disabled={deletingId === doc.id}
+                    style={{fontSize:12,padding:"4px 10px"}}
+                    title="Elimina"
+                  >{deletingId === doc.id ? "…" : "🗑"}</button>
+                </div>
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
     </div>
   );
 }

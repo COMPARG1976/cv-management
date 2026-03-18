@@ -652,10 +652,9 @@ async def upload_cert_doc(
 ):
     """
     Carica un file allegato a una certificazione (PDF, immagine, docx — max 10 MB).
-    Disponibile per qualsiasi tipo di certificazione (Credly, URL, SharePoint, None).
-    Salva in uploads/certs/{user_id}/cert_{cert_id}.{ext}.
-    Idempotente: sovrascrive il file precedente sullo stesso cert_id.
-    NON modifica doc_attachment_type né doc_url — usa il campo uploaded_file_path.
+    Se SharePoint e' configurato salva su SP (STAFF_DATA_AND_DOCUMENTS/{email}/Certificazioni/).
+    Altrimenti salva in locale (uploads/certs/{user_id}/).
+    Idempotente: sovrascrive il file precedente.
     """
     cert = (
         db.query(Certification)
@@ -675,27 +674,40 @@ async def upload_cert_doc(
     if ext not in allowed:
         raise HTTPException(400, f"Formato non supportato ({ext}). Ammessi: pdf, jpg, png, docx")
 
-    safe_name = f"cert_{cert_id}{ext}"
-    cert_dir = os.path.join(settings.upload_dir, "certs", str(current_user.id))
-    os.makedirs(cert_dir, exist_ok=True)
+    if settings.sharepoint_enabled:
+        # ── SharePoint ──────────────────────────────────────────────────────
+        from app.sharepoint import upload_cert_file
+        try:
+            sp_path = await upload_cert_file(
+                user_email=current_user.email,
+                cert_id=cert_id,
+                original_filename=file.filename or f"cert_{cert_id}{ext}",
+                content=content_bytes,
+            )
+            cert.uploaded_file_path = f"sp:{sp_path}"
+        except Exception as e:
+            raise HTTPException(502, f"Errore upload SharePoint: {e}")
+    else:
+        # ── Storage locale (fallback) ───────────────────────────────────────
+        safe_name = f"cert_{cert_id}{ext}"
+        cert_dir  = os.path.join(settings.upload_dir, "certs", str(current_user.id))
+        os.makedirs(cert_dir, exist_ok=True)
+        with open(os.path.join(cert_dir, safe_name), "wb") as fh:
+            fh.write(content_bytes)
+        cert.uploaded_file_path = f"/uploads/certs/{current_user.id}/{safe_name}"
 
-    file_path = os.path.join(cert_dir, safe_name)
-    with open(file_path, "wb") as fh:
-        fh.write(content_bytes)
-
-    cert.uploaded_file_path = f"/uploads/certs/{current_user.id}/{safe_name}"
     db.commit()
     db.refresh(cert)
     return cert
 
 
 @router.delete("/me/certifications/{cert_id}/upload-doc", status_code=204)
-def delete_cert_doc(
+async def delete_cert_doc(
     cert_id: int,
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    """Rimuove il file allegato caricato (non cancella il record cert)."""
+    """Rimuove il file allegato (da SharePoint o da disco locale)."""
     cert = (
         db.query(Certification)
         .join(CV, Certification.cv_id == CV.id)
@@ -706,24 +718,36 @@ def delete_cert_doc(
         _404("Certificazione non trovata")
 
     if cert.uploaded_file_path:
-        abs_path = os.path.join(
-            settings.upload_dir,
-            cert.uploaded_file_path.lstrip("/uploads/").lstrip("uploads/"),
-        )
-        if os.path.exists(abs_path):
-            os.remove(abs_path)
+        if cert.uploaded_file_path.startswith("sp:"):
+            # ── SharePoint ─────────────────────────────────────────────────
+            from app.sharepoint import delete_file
+            try:
+                await delete_file(cert.uploaded_file_path[3:])
+            except Exception:
+                pass  # Non bloccare la UI se il file non esiste più su SP
+        else:
+            # ── Storage locale ──────────────────────────────────────────────
+            rel      = cert.uploaded_file_path.lstrip("/uploads/").lstrip("uploads/")
+            abs_path = os.path.join(settings.upload_dir, rel)
+            if os.path.exists(abs_path):
+                os.remove(abs_path)
+
         cert.uploaded_file_path = None
         db.commit()
 
 
 @router.get("/me/certifications/{cert_id}/download-doc")
-def download_cert_doc(
+async def download_cert_doc(
     cert_id: int,
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    """Scarica il file allegato caricato dall'utente per una certificazione."""
-    from fastapi.responses import FileResponse
+    """
+    Scarica il file allegato.
+    - SharePoint: redirect a URL pre-firmato Graph API (~1h di validita')
+    - Locale: FileResponse diretto
+    """
+    from fastapi.responses import FileResponse, RedirectResponse
 
     cert = (
         db.query(Certification)
@@ -736,14 +760,22 @@ def download_cert_doc(
     if not cert.uploaded_file_path:
         raise HTTPException(404, "Nessun file allegato per questa certificazione")
 
-    # uploaded_file_path = /uploads/certs/{user_id}/cert_{id}.pdf
-    rel = cert.uploaded_file_path.lstrip("/")
-    abs_path = os.path.join("/app", rel)
-    if not os.path.exists(abs_path):
-        raise HTTPException(404, "File non trovato su disco")
-
-    filename = os.path.basename(abs_path)
-    return FileResponse(abs_path, filename=filename, media_type="application/octet-stream")
+    if cert.uploaded_file_path.startswith("sp:"):
+        # ── SharePoint ──────────────────────────────────────────────────────
+        from app.sharepoint import get_download_url
+        try:
+            url = await get_download_url(cert.uploaded_file_path[3:])
+        except Exception as e:
+            raise HTTPException(502, f"Impossibile ottenere URL da SharePoint: {e}")
+        return RedirectResponse(url)
+    else:
+        # ── Storage locale ──────────────────────────────────────────────────
+        rel      = cert.uploaded_file_path.lstrip("/")
+        abs_path = os.path.join("/app", rel)
+        if not os.path.exists(abs_path):
+            raise HTTPException(404, "File non trovato su disco")
+        filename = os.path.basename(abs_path)
+        return FileResponse(abs_path, filename=filename, media_type="application/octet-stream")
 
 
 # ── Certificazioni — Credly preview ───────────────────────────────────────────

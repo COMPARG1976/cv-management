@@ -22,9 +22,18 @@ class Settings(BaseSettings):
     entra_audience: Optional[str] = None       # default: api://<client_id>
     entra_redirect_uri: str = "http://localhost:8082/auth/callback"
 
+    # ── SharePoint / Microsoft Graph ───────────────────────────────────────────
+    sharepoint_site_url: str = ""          # es. https://mashfroggroup.sharepoint.com/sites/ENT_SOLUTION_M4P_STAFF
+    sharepoint_drive_name: str = "Documenti"
+    sharepoint_root_folder: str = "STAFF_DATA_AND_DOCUMENTS"
+
     @property
     def entra_enabled(self) -> bool:
         return bool(self.entra_tenant_id and self.entra_client_id and self.entra_client_secret)
+
+    @property
+    def sharepoint_enabled(self) -> bool:
+        return bool(self.entra_enabled and self.sharepoint_site_url)
 
     model_config = {"env_file": ".env", "extra": "ignore"}
 

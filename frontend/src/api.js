@@ -168,9 +168,11 @@ export async function deleteExperience(token, expId) {
 
 // ── Upload & Parsing ──────────────────────────────────────────────────────────
 
-export async function uploadCV(token, file) {
+export async function uploadCV(token, file, { aiUpdate = true, tags = [] } = {}) {
   const formData = new FormData();
   formData.append("file", file);
+  formData.append("ai_update", aiUpdate ? "true" : "false");
+  formData.append("tags", JSON.stringify(tags));
   const res = await fetch(`${BASE_URL}/upload/cv`, {
     method: "POST",
     headers: { Authorization: `Bearer ${token}` },
@@ -181,6 +183,34 @@ export async function uploadCV(token, file) {
     throw new Error(body.detail || "Upload fallito");
   }
   return res.json();
+}
+
+export async function getDocuments(token) {
+  return apiFetch("/upload/documents", {}, token);
+}
+
+export async function downloadDocument(token, docId, filename = "cv_document") {
+  const res = await fetch(`${BASE_URL}/upload/documents/${docId}/download`, {
+    headers: { Authorization: `Bearer ${token}` },
+    redirect: "follow",
+  });
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({}));
+    throw new Error(body.detail || "Download fallito");
+  }
+  const blob = await res.blob();
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  setTimeout(() => URL.revokeObjectURL(url), 5000);
+}
+
+export async function deleteDocument(token, docId) {
+  return apiFetch(`/upload/documents/${docId}`, { method: "DELETE" }, token);
 }
 
 export async function getParseResult(token, documentId) {

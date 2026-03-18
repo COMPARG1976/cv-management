@@ -27,6 +27,18 @@ async def lifespan(app: FastAPI):
         seed_from_excel(db)     # crea utenti Excel con PLACEHOLDER_HASH
         from app.seed import _sync_all_passwords
         _sync_all_passwords(db) # ri-sincronizza TUTTI (inclusi quelli appena creati da Excel)
+
+    # SharePoint health-check (non bloccante)
+    if settings.sharepoint_enabled:
+        from app.sharepoint import verify_connection
+        result = await verify_connection()
+        if result["ok"]:
+            logger.info(f"SharePoint OK — drive_id={result['drive_id']}")
+        else:
+            logger.warning(f"SharePoint NON raggiungibile: {result['error']}")
+    else:
+        logger.info("SharePoint non configurato — uso storage locale")
+
     yield
     # Shutdown (nessuna azione necessaria)
 
@@ -50,6 +62,22 @@ def ensure_schema_compatibility() -> None:
         # Sprint 6 — uploaded_file_path su certifications
         conn.execute(text(
             "ALTER TABLE certifications ADD COLUMN IF NOT EXISTS uploaded_file_path VARCHAR(1000)"
+        ))
+
+        # Sprint 6 — tags liberi su certifications
+        conn.execute(text(
+            "ALTER TABLE certifications ADD COLUMN IF NOT EXISTS tags TEXT[]"
+        ))
+
+        # Sprint 6 — nuovi campi CVDocument
+        conn.execute(text(
+            "ALTER TABLE cv_documents ADD COLUMN IF NOT EXISTS storage_path VARCHAR(1000)"
+        ))
+        conn.execute(text(
+            "ALTER TABLE cv_documents ADD COLUMN IF NOT EXISTS tags TEXT[]"
+        ))
+        conn.execute(text(
+            "ALTER TABLE cv_documents ADD COLUMN IF NOT EXISTS ai_updated BOOLEAN DEFAULT FALSE"
         ))
 
         conn.commit()
