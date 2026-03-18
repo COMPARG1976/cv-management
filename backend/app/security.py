@@ -1,6 +1,5 @@
 """
-Auth e sicurezza — pattern identico a IT_RESOURCE_MGMT.
-Predisposto per futura integrazione con Microsoft Entra ID.
+Auth e sicurezza — JWT + password hashing.
 """
 from datetime import datetime, timedelta, timezone
 from typing import Optional
@@ -8,7 +7,7 @@ from typing import Optional
 from jose import JWTError, jwt
 from passlib.hash import pbkdf2_sha256
 
-from app.database import settings
+from app.excel_store import settings
 
 
 def create_access_token(data: dict, expires_delta: Optional[timedelta] = None) -> str:

@@ -1,6 +1,6 @@
 """
-Router /upload — Sprint 3.
-POST /cv    : carica file, chiama AI service, calcola diff con DB, restituisce risultato
+Router /upload — Sprint 3 (Excel backend).
+POST /cv    : carica file, chiama AI service, calcola diff con STORE, restituisce risultato
 POST /apply : applica le modifiche selezionate dall'utente
 """
 import json
@@ -8,20 +8,14 @@ import os
 import uuid
 from datetime import datetime, date
 from difflib import SequenceMatcher
-from typing import Optional, Any, List
+from typing import Optional, Any
 
 import httpx
 from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Form
-from fastapi.responses import FileResponse, RedirectResponse
-from sqlalchemy.exc import IntegrityError
-from sqlalchemy.orm import Session, selectinload
 
-from app.database import get_db, settings
+import app.excel_store as store
+from app.excel_store import settings
 from app.deps import get_current_user
-from app.models import (
-    User, CV, CVDocument, CVSkill, Reference, Education,
-    Certification, Language, SkillCategory, LanguageLevel, DocAttachmentType, DegreeLevel,
-)
 
 router = APIRouter()
 
@@ -38,9 +32,7 @@ def _sim(a: str, b: str) -> float:
 
 
 def _parse_date(date_str: Optional[str]) -> Optional[date]:
-    """Parsa data e normalizza SEMPRE al primo del mese (ignora il giorno).
-    Esempi: "2020-01-15" -> date(2020,1,1) | "2020-01" -> date(2020,1,1) | "2020" -> date(2020,1,1)
-    """
+    """Parsa data e normalizza SEMPRE al primo del mese (ignora il giorno)."""
     if not date_str:
         return None
     try:
@@ -50,844 +42,530 @@ def _parse_date(date_str: Optional[str]) -> Optional[date]:
         if len(s) == 7 and "-" in s:
             y, m = s.split("-")
             return date(int(y), int(m), 1)
-        # Data completa: prendi solo anno+mese
-        d = date.fromisoformat(s[:10])
-        return date(d.year, d.month, 1)
-    except (ValueError, IndexError):
-        return None
+        if len(s) >= 10:
+            parts = s[:10].split("-")
+            return date(int(parts[0]), int(parts[1]), 1)
+    except Exception:
+        pass
+    return None
 
 
-def _ym(date_str: Optional[str]) -> Optional[str]:
-    """Normalizza data a stringa YYYY-MM per confronto (ignora il giorno).
-    Il giorno è sempre 1 in DB (normalizzato da _parse_date), ma l'AI
-    restituisce 'YYYY-MM' senza giorno -> i due formati sono diversi stringa
-    ma uguali nel senso mese/anno.
-    """
-    d = _parse_date(date_str)
-    if d is None:
-        return None
-    return f"{d.year}-{d.month:02d}"
+def _date_str(d: Optional[date]) -> Optional[str]:
+    return d.isoformat() if d else None
 
 
-# ── Field-level diff ──────────────────────────────────────────────────────────
+# ── Normalizzazione AI data ───────────────────────────────────────────────────
 
-def _field_diff(label: str, field: str, db_val: Any, ai_val: Any) -> dict:
-    db_s = str(db_val).strip() if db_val is not None else None
-    ai_s = str(ai_val).strip() if ai_val is not None else None
-    if db_s is None and ai_s is None:
-        status = "unchanged"
-    elif db_s is None and ai_s is not None:
-        status = "new_ai"
-    elif db_s is not None and ai_s is None:
-        status = "db_only"
-    elif db_s != ai_s:
-        status = "changed"
-    else:
-        status = "unchanged"
-    return {"field": field, "label": label, "db_value": db_val, "ai_value": ai_val, "status": status}
-
-
-def _section(items: list, ai_raw: list) -> dict:
-    confs = [x.get("confidence", 0.0) for x in ai_raw if isinstance(x, dict)]
-    avg_conf = round(sum(confs) / len(confs), 2) if confs else 0.0
-    return {
-        "confidence": avg_conf,
-        "items": items,
-        "count_new":       sum(1 for i in items if i.get("status") == "new"),
-        "count_changed":   sum(1 for i in items if i.get("status") == "changed"),
-        "count_unchanged": sum(1 for i in items if i.get("status") == "unchanged"),
-        "count_db_only":   sum(1 for i in items if i.get("status") == "db_only"),
-    }
-
-
-# ── AI field mapping ──────────────────────────────────────────────────────────
-
-def _map_level(level: Optional[str]) -> Optional[int]:
-    """AI level (BASE/INTERMEDIO/AVANZATO/ESPERTO) → DB rating 1-5."""
-    return {"BASE": 1, "INTERMEDIO": 3, "AVANZATO": 4, "ESPERTO": 5}.get((level or "").upper())
-
-
-def _map_category(category: Optional[str]) -> str:
-    """AI category → DB SkillCategory.
-    TECNICA / HARD / TECHNICAL / TECH → HARD
-    LINGUISTICA / SOFT / COMUNICAZIONE → SOFT
-    """
-    cat = (category or "").upper().strip()
-    HARD_KW = {"TECNICA", "TECHNICAL", "TECH", "HARD", "CERTIFICAZIONE",
-               "INFORMATICA", "IT", "BACKEND", "FRONTEND", "FRAMEWORK"}
-    if any(kw in cat for kw in HARD_KW):
+def _normalize_category(raw: str) -> str:
+    raw = (raw or "").upper()
+    if raw in ("SOFT", "HARD"):
+        return raw
+    if any(k in raw for k in ("TECN", "TECH", "HARD", "IT")):
         return "HARD"
     return "SOFT"
 
 
-# ── Ref sort key ──────────────────────────────────────────────────────────────
-
-def _ref_date_val(date_str, is_current: bool = False) -> int:
-    """Converte una data in un intero YYYYMM per ordinamento DESC.
-    Posizione corrente (is_current=True o end_date assente) → valore massimo."""
-    if is_current or not date_str:
-        return 999999
-    d = _parse_date(str(date_str))
-    return (d.year * 100 + d.month) if d else 0
-
-
-def _ref_sort_key(item: dict) -> tuple:
-    """Chiave di ordinamento: end_date DESC, start_date DESC.
-    Posizioni correnti (end_date None) compaiono per prime."""
-    if item.get("status") in ("changed", "unchanged", "db_only"):
-        data = item.get("db_data", {})
-    else:  # new
-        data = item.get("ai_data", {})
-    end_val   = _ref_date_val(data.get("end_date"),   data.get("is_current", False))
-    start_val = _ref_date_val(data.get("start_date"), False)
-    return (-end_val, -start_val)
+def _normalize_rating(raw) -> Optional[int]:
+    """Converte livello testuale o numerico in rating 1-5."""
+    if raw is None:
+        return None
+    if isinstance(raw, int):
+        return max(1, min(5, raw))
+    mapping = {
+        "base": 2, "beginner": 1, "basic": 2,
+        "intermediate": 3, "medio": 3, "buono": 3,
+        "advanced": 4, "avanzato": 4, "ottimo": 4,
+        "expert": 5, "esperto": 5, "master": 5,
+    }
+    key = str(raw).lower().strip()
+    return mapping.get(key, 3)
 
 
-# ── Diff computation ──────────────────────────────────────────────────────────
+def _degree_level(raw: str) -> Optional[str]:
+    """Normalizza un titolo di studio in degree_level."""
+    raw = (raw or "").lower()
+    if any(k in raw for k in ("doctor", "phd", "dottor")):
+        return "DOTTORATO"
+    if any(k in raw for k in ("master", "magistr", "laurea magistr", "laurea spec", "msc", "mba")):
+        return "LAUREA_MAGISTRALE"
+    if any(k in raw for k in ("laurea", "bachelor", "triennal", "bsc")):
+        return "LAUREA_TRIENNALE"
+    if any(k in raw for k in ("diploma", "maturit", "liceo", "istituto")):
+        return "DIPLOMA"
+    if any(k in raw for k in ("certific", "cours", "corso")):
+        return "CORSO"
+    return "ALTRO"
 
-def compute_diff(cv: CV, ai: dict) -> dict:
-    """Confronta i dati AI estratti con i dati esistenti nel DB e restituisce il diff."""
 
-    prof = ai.get("profile", {})
+# ── Diff engine ───────────────────────────────────────────────────────────────
 
-    # ── Profilo ──
-    profile_diffs = [
-        _field_diff("Titolo professionale", "title",          cv.title,          prof.get("title")),
-        _field_diff("Sommario / Bio",        "summary",        cv.summary,        prof.get("summary")),
-        _field_diff("Telefono",              "phone",          cv.phone,          prof.get("phone")),
-        _field_diff("LinkedIn",              "linkedin_url",   cv.linkedin_url,   prof.get("linkedin")),
-        _field_diff("Citta di residenza",    "residence_city", cv.residence_city, prof.get("location")),
+def compute_diff(email: str, ai: dict) -> dict:
+    """
+    Confronta i dati AI con il profilo attuale in STORE.
+    Restituisce struttura diff pronta per il frontend.
+    """
+    # ── Profilo scalare ────────────────────────────────────────────────────────
+    cv_row = store.STORE["cv_profiles"].get(email, {})
+    user_row = store.STORE["users"].get(email, {})
+
+    scalar_fields = [
+        "title", "summary", "phone", "linkedin_url",
+        "birth_date", "birth_place", "residence_city",
+        "first_employment_date", "availability_status",
     ]
+    profile_diff = []
+    ai_profile = ai.get("profile", {})
+    for field in scalar_fields:
+        db_val = cv_row.get(field) or user_row.get(field)
+        ai_val = ai_profile.get(field)
+        if ai_val is not None and ai_val != "" and ai_val != db_val:
+            profile_diff.append({
+                "field": field,
+                "db_value": db_val,
+                "ai_value": ai_val,
+                "selected": "db",   # default conservativo
+            })
 
-    # ── Competenze ──
-    db_skills   = list(cv.skills or [])
-    ai_skills   = ai.get("skills", [])
-    skills_items: list = []
-    matched_sk:  set   = set()
-
-    for ai_sk in ai_skills:
-        ai_name = (ai_sk.get("name") or "").strip()
-        # Match: exact → fuzzy
-        db_sk = next((s for s in db_skills if s.skill_name.lower() == ai_name.lower()), None)
-        if db_sk is None:
-            db_sk = next((s for s in db_skills if _sim(s.skill_name, ai_name) > 0.85), None)
-
-        ai_rating = _map_level(ai_sk.get("level"))
-        ai_cat    = _map_category(ai_sk.get("category"))
-        ai_label  = (ai_sk.get("level") or "").upper()
-
-        if db_sk is None:
-            skills_items.append({
+    # ── Skills ────────────────────────────────────────────────────────────────
+    existing_skills = store.STORE["skills"].get(email, [])
+    ai_skills = ai.get("skills", [])
+    skill_items = []
+    for ai_s in ai_skills:
+        name = (ai_s.get("skill_name") or ai_s.get("name") or "").strip()
+        if not name:
+            continue
+        match = next(
+            (s for s in existing_skills if _sim(s.get("skill_name", ""), name) >= 0.85),
+            None,
+        )
+        category = _normalize_category(ai_s.get("category", "HARD"))
+        rating = _normalize_rating(ai_s.get("rating") or ai_s.get("level"))
+        if match:
+            changed = (
+                match.get("category") != category
+                or match.get("rating") != rating
+            )
+            skill_items.append({
+                "status": "changed" if changed else "unchanged",
+                "db": match,
+                "ai": {"skill_name": name, "category": category, "rating": rating},
+                "selected": "db",
+            })
+        else:
+            skill_items.append({
                 "status": "new",
-                "ai_data": {
-                    "skill_name": ai_name, "category": ai_cat,
-                    "rating": ai_rating,   "level_label": ai_label,
-                    "years_experience": ai_sk.get("years_experience"),
-                },
-                "confidence": ai_sk.get("confidence", 0.0),
+                "db": None,
+                "ai": {"skill_name": name, "category": category, "rating": rating},
+                "selected": "ai",
             })
-        else:
-            matched_sk.add(db_sk.id)
-            fds = [
-                _field_diff("Livello",   "rating",   db_sk.rating,
-                            ai_rating),
-                _field_diff("Categoria", "category",
-                            db_sk.category.value if db_sk.category else None, ai_cat),
-            ]
-            changed = any(f["status"] not in ("unchanged", "db_only") for f in fds)
-            db_label = {1: "BASE", 2: "BASE", 3: "INTERMEDIO", 4: "AVANZATO", 5: "ESPERTO"}.get(db_sk.rating, "")
-            skills_items.append({
-                "status": "changed" if changed else "unchanged",
-                "db_id":   db_sk.id,
-                "db_data": {"skill_name": db_sk.skill_name,
-                            "category":   db_sk.category.value if db_sk.category else None,
-                            "rating":     db_sk.rating, "level_label": db_label},
-                "ai_data": {"skill_name": ai_name, "category": ai_cat,
-                            "rating": ai_rating, "level_label": ai_label,
-                            "years_experience": ai_sk.get("years_experience")},
-                "field_diffs": fds,
-                "confidence": ai_sk.get("confidence", 0.0),
+    # skill solo in DB
+    for s in existing_skills:
+        if not any(
+            it["db"] and it["db"].get("id") == s.get("id") for it in skill_items
+        ):
+            skill_items.append({
+                "status": "db_only",
+                "db": s,
+                "ai": None,
+                "selected": "db",
             })
 
-    for db_sk in db_skills:
-        if db_sk.id not in matched_sk:
-            skills_items.append({
-                "status": "db_only", "db_id": db_sk.id,
-                "db_data": {"skill_name": db_sk.skill_name,
-                            "category": db_sk.category.value if db_sk.category else None},
-            })
-
-    # ── Esperienze (AI) → Referenze (DB) ──
-    db_refs  = list(cv.references or [])
-    ai_exps  = ai.get("experiences", [])
-    refs_items: list = []
-    matched_ref: set = set()
-
-    for ai_exp in ai_exps:
-        best_ref, best_score = None, 0.0
-        for ref in db_refs:
-            if ref.id in matched_ref:
-                continue  # già abbinata a un'altra AI exp → non riusare (matching 1:1)
-            c = _sim(ref.company_name or "", ai_exp.get("company", ""))
-            r = _sim(ref.role or "",         ai_exp.get("role", ""))
-            score = c * 0.5 + r * 0.3
-            ai_yr = (ai_exp.get("start_date") or "")[:4]
-            if ai_yr and ref.start_date and ai_yr == str(ref.start_date.year):
-                score += 0.2
-            if score > best_score and score > 0.45:
-                best_score, best_ref = score, ref
-
-        ai_ref = {
-            "company_name":       ai_exp.get("company"),
-            "client_name":        None,
-            "role":               ai_exp.get("role"),
-            "start_date":         ai_exp.get("start_date"),
-            "end_date":           ai_exp.get("end_date"),
-            "is_current":         ai_exp.get("is_current", False),
-            "project_description":ai_exp.get("description"),
-            "activities":         None,
-            "skills_acquired":    ai_exp.get("skills_used", []),
+    # ── Esperienze ────────────────────────────────────────────────────────────
+    existing_exp = store.STORE["experiences"].get(email, [])
+    ai_exp = ai.get("references", ai.get("experiences", []))
+    exp_items = []
+    for ai_e in ai_exp:
+        company = (ai_e.get("company_name") or ai_e.get("company") or "").strip()
+        role = (ai_e.get("role") or "").strip()
+        match = next(
+            (
+                e for e in existing_exp
+                if _sim(e.get("company_name", ""), company) >= 0.80
+                and _sim(e.get("role", ""), role) >= 0.70
+            ),
+            None,
+        )
+        ai_norm = {
+            "company_name": company,
+            "client_name": ai_e.get("client_name"),
+            "role": role,
+            "start_date": _date_str(_parse_date(ai_e.get("start_date"))),
+            "end_date": _date_str(_parse_date(ai_e.get("end_date"))),
+            "is_current": ai_e.get("is_current", False),
+            "project_description": ai_e.get("project_description") or ai_e.get("description"),
+            "activities": ai_e.get("activities"),
         }
-        if best_ref is None:
-            refs_items.append({"status": "new", "ai_data": ai_ref, "confidence": ai_exp.get("confidence", 0.0)})
+        if match:
+            exp_items.append({
+                "status": "changed",
+                "db": match,
+                "ai": ai_norm,
+                "selected": "db",
+            })
         else:
-            matched_ref.add(best_ref.id)
-            db_start = str(best_ref.start_date) if best_ref.start_date else None
-            db_end   = str(best_ref.end_date)   if best_ref.end_date   else None
-            db_ref_d = {
-                "company_name": best_ref.company_name,
-                "role":         best_ref.role,
-                "start_date":   db_start,
-                "end_date":     db_end,
-                "is_current":   best_ref.is_current,
-                "project_description": best_ref.project_description,
-                "skills_acquired": best_ref.skills_acquired or [],
-            }
-            fds = [
-                _field_diff("Azienda",       "company_name",        best_ref.company_name,         ai_exp.get("company")),
-                _field_diff("Ruolo",          "role",               best_ref.role,                  ai_exp.get("role")),
-                # Confronto solo YYYY-MM: DB salva "YYYY-MM-01", AI restituisce "YYYY-MM"
-                _field_diff("Data inizio",    "start_date",         _ym(db_start),                  _ym(ai_exp.get("start_date"))),
-                _field_diff("Data fine",      "end_date",           _ym(db_end),                    _ym(ai_exp.get("end_date"))),
-                _field_diff("Corrente",       "is_current",         best_ref.is_current,            ai_exp.get("is_current", False)),
-                _field_diff("Descrizione",    "project_description",best_ref.project_description,   ai_exp.get("description")),
-                _field_diff("Tecnologie",     "skills_acquired",
-                            ", ".join(best_ref.skills_acquired or []) or None,
-                            ", ".join(ai_exp.get("skills_used", [])) or None),
-            ]
-            changed = any(f["status"] not in ("unchanged", "db_only") for f in fds)
-            refs_items.append({
-                "status": "changed" if changed else "unchanged",
-                "db_id": best_ref.id, "db_data": db_ref_d, "ai_data": ai_ref,
-                "field_diffs": fds,
-                "confidence": ai_exp.get("confidence", 0.0),
+            exp_items.append({
+                "status": "new",
+                "db": None,
+                "ai": ai_norm,
+                "selected": "ai",
+            })
+    for e in existing_exp:
+        if not any(it["db"] and it["db"].get("id") == e.get("id") for it in exp_items):
+            exp_items.append({
+                "status": "db_only",
+                "db": e,
+                "ai": None,
+                "selected": "db",
             })
 
-    for ref in db_refs:
-        if ref.id not in matched_ref:
-            refs_items.append({
-                "status": "db_only", "db_id": ref.id,
-                "db_data": {"company_name": ref.company_name, "role": ref.role,
-                            "start_date": str(ref.start_date) if ref.start_date else None,
-                            "end_date":   str(ref.end_date)   if ref.end_date   else None,
-                            "is_current": ref.is_current},
-            })
-
-    # Ordina dalla più recente alla più vecchia (end_date DESC, start_date DESC)
-    refs_items.sort(key=_ref_sort_key)
-
-    # ── Formazione ──
-    db_edus  = list(cv.educations or [])
-    ai_edus  = ai.get("educations", [])
-    edus_items: list = []
-    matched_edu: set = set()
-
-    for ai_edu in ai_edus:
-        best_edu, best_score = None, 0.0
-        for edu in db_edus:
-            score = _sim(edu.institution, ai_edu.get("institution", ""))
-            if (ai_edu.get("graduation_year") and edu.graduation_year
-                    and int(ai_edu["graduation_year"]) == edu.graduation_year):
-                score += 0.3
-            if score > best_score and score > 0.5:
-                best_score, best_edu = score, edu
-
-        ai_edu_d = {
-            "institution":    ai_edu.get("institution"),
-            "degree_type_raw":ai_edu.get("degree_type"),
-            "field_of_study": ai_edu.get("field_of_study"),
-            "graduation_year":ai_edu.get("graduation_year"),
-            "grade":          ai_edu.get("grade"),
+    # ── Education ─────────────────────────────────────────────────────────────
+    existing_edu = store.STORE["educations"].get(email, [])
+    ai_edu = ai.get("educations", [])
+    edu_items = []
+    for ai_ed in ai_edu:
+        inst = (ai_ed.get("institution") or "").strip()
+        match = next(
+            (e for e in existing_edu if _sim(e.get("institution", ""), inst) >= 0.80),
+            None,
+        )
+        ai_norm = {
+            "institution": inst,
+            "degree_level": _degree_level(ai_ed.get("degree_level") or ai_ed.get("degree_type") or ""),
+            "field_of_study": ai_ed.get("field_of_study"),
+            "graduation_year": ai_ed.get("graduation_year"),
+            "grade": ai_ed.get("grade"),
+            "notes": ai_ed.get("notes"),
         }
-        if best_edu is None:
-            edus_items.append({"status": "new", "ai_data": ai_edu_d, "confidence": ai_edu.get("confidence", 0.0)})
+        if match:
+            edu_items.append({
+                "status": "changed",
+                "db": match,
+                "ai": ai_norm,
+                "selected": "db",
+            })
         else:
-            matched_edu.add(best_edu.id)
-            fds = [
-                _field_diff("Istituto",     "institution",    best_edu.institution,    ai_edu.get("institution")),
-                _field_diff("Campo studio", "field_of_study", best_edu.field_of_study, ai_edu.get("field_of_study")),
-                _field_diff("Anno",         "graduation_year",best_edu.graduation_year,ai_edu.get("graduation_year")),
-                _field_diff("Voto",         "grade",          best_edu.grade,          ai_edu.get("grade")),
-            ]
-            changed = any(f["status"] not in ("unchanged", "db_only") for f in fds)
-            edus_items.append({
-                "status": "changed" if changed else "unchanged",
-                "db_id": best_edu.id,
-                "db_data": {"institution": best_edu.institution,
-                            "field_of_study": best_edu.field_of_study,
-                            "graduation_year": best_edu.graduation_year, "grade": best_edu.grade},
-                "ai_data": ai_edu_d,
-                "field_diffs": fds,
-                "confidence": ai_edu.get("confidence", 0.0),
+            edu_items.append({
+                "status": "new",
+                "db": None,
+                "ai": ai_norm,
+                "selected": "ai",
+            })
+    for e in existing_edu:
+        if not any(it["db"] and it["db"].get("id") == e.get("id") for it in edu_items):
+            edu_items.append({
+                "status": "db_only",
+                "db": e,
+                "ai": None,
+                "selected": "db",
             })
 
-    for edu in db_edus:
-        if edu.id not in matched_edu:
-            edus_items.append({
-                "status": "db_only", "db_id": edu.id,
-                "db_data": {"institution": edu.institution, "graduation_year": edu.graduation_year},
-            })
-
-    # ── Certificazioni ──
-    db_certs  = list(cv.certifications or [])
-    ai_certs  = ai.get("certifications", [])
-    certs_items: list = []
-    matched_cert: set = set()
-
-    for ai_cert in ai_certs:
-        best_cert = max(db_certs, key=lambda c: _sim(c.name, ai_cert.get("name", "")), default=None)
-        if best_cert and _sim(best_cert.name, ai_cert.get("name", "")) < 0.7:
-            best_cert = None
-        ai_year = None
-        try:
-            ai_year = int(str(ai_cert.get("issue_date") or "")[:4]) if ai_cert.get("issue_date") else None
-        except (ValueError, TypeError):
-            pass
-        ai_cert_d = {
-            "name":        ai_cert.get("name"),
-            "issuing_org": ai_cert.get("issuing_org"),
-            "year":        ai_year,
-            "expiry_date": ai_cert.get("expiry_date"),
-            "doc_url":     ai_cert.get("credential_url"),
+    # ── Certifications ────────────────────────────────────────────────────────
+    existing_certs = store.STORE["certifications"].get(email, [])
+    ai_certs = ai.get("certifications", [])
+    cert_items = []
+    for ai_c in ai_certs:
+        name = (ai_c.get("name") or "").strip()
+        match = next(
+            (c for c in existing_certs if _sim(c.get("name", ""), name) >= 0.80),
+            None,
+        )
+        ai_norm = {
+            "name": name,
+            "issuing_org": ai_c.get("issuing_org"),
+            "cert_code": ai_c.get("cert_code"),
+            "year": ai_c.get("year"),
+            "notes": ai_c.get("notes"),
         }
-        if best_cert is None:
-            certs_items.append({"status": "new", "ai_data": ai_cert_d, "confidence": ai_cert.get("confidence", 0.0)})
+        if match:
+            cert_items.append({
+                "status": "changed",
+                "db": match,
+                "ai": ai_norm,
+                "selected": "db",
+            })
         else:
-            matched_cert.add(best_cert.id)
-            fds = [
-                _field_diff("Nome",     "name",        best_cert.name,                                          ai_cert.get("name")),
-                _field_diff("Ente",     "issuing_org", best_cert.issuing_org,                                   ai_cert.get("issuing_org")),
-                _field_diff("Anno",     "year",        best_cert.year,                                          ai_year),
-                _field_diff("Scadenza", "expiry_date",
-                            str(best_cert.expiry_date) if best_cert.expiry_date else None,
-                            ai_cert.get("expiry_date")),
-            ]
-            changed = any(f["status"] not in ("unchanged", "db_only") for f in fds)
-            certs_items.append({
-                "status": "changed" if changed else "unchanged",
-                "db_id": best_cert.id,
-                "db_data": {"name": best_cert.name, "issuing_org": best_cert.issuing_org, "year": best_cert.year},
-                "ai_data": ai_cert_d,
-                "field_diffs": fds,
-                "confidence": ai_cert.get("confidence", 0.0),
+            cert_items.append({
+                "status": "new",
+                "db": None,
+                "ai": ai_norm,
+                "selected": "ai",
+            })
+    for c in existing_certs:
+        if not any(it["db"] and it["db"].get("id") == c.get("id") for it in cert_items):
+            cert_items.append({
+                "status": "db_only",
+                "db": c,
+                "ai": None,
+                "selected": "db",
             })
 
-    for cert in db_certs:
-        if cert.id not in matched_cert:
-            certs_items.append({"status": "db_only", "db_id": cert.id, "db_data": {"name": cert.name}})
-
-    # ── Lingue ──
-    db_langs  = list(cv.languages or [])
-    ai_langs  = ai.get("languages", [])
-    langs_items: list = []
-    matched_lang: set = set()
-
-    for ai_lang in ai_langs:
-        ai_name  = (ai_lang.get("language_name") or "").strip()
-        ai_level = (ai_lang.get("level") or "").upper()
-        db_lang  = next((l for l in db_langs if l.language_name.lower() == ai_name.lower()), None)
-        if db_lang is None:
-            db_lang = next((l for l in db_langs if _sim(l.language_name, ai_name) > 0.85), None)
-
-        if db_lang is None:
-            langs_items.append({"status": "new", "ai_data": {"language_name": ai_name, "level": ai_level},
-                                "confidence": ai_lang.get("confidence", 0.0)})
-        else:
-            matched_lang.add(db_lang.id)
-            db_level = db_lang.level.value if db_lang.level else None
-            fd = _field_diff("Livello", "level", db_level, ai_level)
-            langs_items.append({
-                "status": "changed" if fd["status"] not in ("unchanged",) else "unchanged",
-                "db_id":   db_lang.id,
-                "db_data": {"language_name": db_lang.language_name, "level": db_level},
-                "ai_data": {"language_name": ai_name, "level": ai_level},
-                "field_diffs": [fd],
-                "confidence": ai_lang.get("confidence", 0.0),
+    # ── Languages ─────────────────────────────────────────────────────────────
+    existing_langs = store.STORE["languages"].get(email, [])
+    ai_langs = ai.get("languages", [])
+    lang_items = []
+    for ai_l in ai_langs:
+        name = (ai_l.get("language_name") or ai_l.get("language") or "").strip()
+        match = next(
+            (l for l in existing_langs if _sim(l.get("language_name", ""), name) >= 0.85),
+            None,
+        )
+        ai_norm = {
+            "language_name": name,
+            "level": ai_l.get("level"),
+        }
+        if match:
+            lang_items.append({
+                "status": "changed" if match.get("level") != ai_l.get("level") else "unchanged",
+                "db": match,
+                "ai": ai_norm,
+                "selected": "db",
             })
-
-    for lang in db_langs:
-        if lang.id not in matched_lang:
-            langs_items.append({"status": "db_only", "db_id": lang.id,
-                                "db_data": {"language_name": lang.language_name}})
+        else:
+            lang_items.append({
+                "status": "new",
+                "db": None,
+                "ai": ai_norm,
+                "selected": "ai",
+            })
+    for l in existing_langs:
+        if not any(it["db"] and it["db"].get("id") == l.get("id") for it in lang_items):
+            lang_items.append({
+                "status": "db_only",
+                "db": l,
+                "ai": None,
+                "selected": "db",
+            })
 
     return {
-        "parse_status":       "done",
-        "overall_confidence": round(ai.get("confidence", 0.0), 2),
-        "profile":            {"confidence": round(prof.get("confidence", 0.0), 2),
-                               "field_diffs": profile_diffs},
-        "skills":             _section(skills_items,  ai_skills),
-        "references":         _section(refs_items,    ai_exps),
-        "educations":         _section(edus_items,    ai_edus),
-        "certifications":     _section(certs_items,   ai_certs),
-        "languages":          _section(langs_items,   ai_langs),
+        "profile": profile_diff,
+        "skills": skill_items,
+        "references": exp_items,
+        "educations": edu_items,
+        "certifications": cert_items,
+        "languages": lang_items,
     }
 
 
-# ── Endpoint: Upload CV ───────────────────────────────────────────────────────
+# ── Endpoint: upload CV ───────────────────────────────────────────────────────
 
 @router.post("/cv")
 async def upload_cv(
     file: UploadFile = File(...),
-    ai_update: bool = Form(True),
-    tags: str = Form("[]"),          # JSON array come stringa: '["CLIENTE X","Gara Y"]'
-    current_user: User = Depends(get_current_user),
-    db: Session = Depends(get_db),
+    current_user: dict = Depends(get_current_user),
 ):
-    """
-    Carica file CV (PDF/DOCX).
-    - Salva sempre il file (SharePoint se configurato, altrimenti locale).
-    - Se ai_update=True: chiama AI service, calcola diff, restituisce risultato per revisione.
-    - Se ai_update=False: salva solo il file, restituisce {document_id, ai_updated: false}.
-    - tags: lista libera per classificazione (es. ["CLIENTE X", "Gara Y"]).
-    """
+    """Carica un CV (PDF/DOCX), chiama AI service per il parsing, calcola diff."""
     ext = os.path.splitext(file.filename or "")[1].lower()
     if ext not in ALLOWED_EXTENSIONS:
-        raise HTTPException(400, f"Formato non supportato: {ext}. Usa PDF o DOCX.")
+        raise HTTPException(400, f"Tipo file non supportato: {ext}")
 
     content = await file.read()
-    if len(content) > settings.max_upload_size_mb * 1024 * 1024:
-        raise HTTPException(400, f"File troppo grande (max {settings.max_upload_size_mb} MB).")
+    max_bytes = settings.max_upload_size_mb * 1024 * 1024
+    if len(content) > max_bytes:
+        raise HTTPException(413, f"File troppo grande (max {settings.max_upload_size_mb} MB)")
 
+    # ── Salva file su disco (volume condiviso con ai-services) ─────────────────
+    upload_dir = "/app/uploads"
+    os.makedirs(upload_dir, exist_ok=True)
+    safe_name = f"{uuid.uuid4()}{ext}"
+    file_path = os.path.join(upload_dir, safe_name)
+    with open(file_path, "wb") as f:
+        f.write(content)
+
+    # ── Crea record Document nello STORE ──────────────────────────────────────
+    email = current_user["email"]
+    doc = await store.add_document(email, {
+        "original_filename": file.filename,
+        "doc_type": "UPLOAD",
+        "upload_date": datetime.utcnow().isoformat(),
+        "ai_updated": False,
+        "tags": [],
+    })
+
+    # ── Chiama AI service ──────────────────────────────────────────────────────
+    ai_url = settings.ai_service_url.rstrip("/")
     try:
-        tags_list: List[str] = json.loads(tags) if tags else []
-        if not isinstance(tags_list, list):
-            tags_list = []
-    except Exception:
-        tags_list = []
+        async with httpx.AsyncClient(timeout=120) as client:
+            with open(file_path, "rb") as f:
+                resp = await client.post(
+                    f"{ai_url}/parse",
+                    files={"file": (file.filename, f, file.content_type or "application/octet-stream")},
+                )
+        if resp.status_code != 200:
+            raise HTTPException(502, f"AI service errore {resp.status_code}: {resp.text[:200]}")
+        ai_data = resp.json()
+    except httpx.RequestError as e:
+        raise HTTPException(502, f"AI service non raggiungibile: {e}")
 
-    # Salva il file su disco locale (necessario per AI service che legge da volume)
-    os.makedirs(settings.upload_dir, exist_ok=True)
-    safe_name = f"{uuid.uuid4().hex}{ext}"
-    file_path  = os.path.join(settings.upload_dir, safe_name)
-    with open(file_path, "wb") as fh:
-        fh.write(content)
+    # ── Calcola diff ──────────────────────────────────────────────────────────
+    diff = compute_diff(email, ai_data)
 
-    # Get or create CV
-    cv = db.query(CV).filter(CV.user_id == current_user.id).first()
-    if not cv:
-        cv = CV(user_id=current_user.id)
-        db.add(cv)
-        db.flush()
-
-    # Crea il record CVDocument
-    doc = CVDocument(
-        cv_id=cv.id,
-        original_filename=file.filename or safe_name,
-        storage_path=f"/uploads/{safe_name}",     # path locale temporaneo
-        mime_type=file.content_type or "application/octet-stream",
-        file_size_bytes=len(content),
-        tags=tags_list if tags_list else None,
-        parse_status="processing" if ai_update else "skipped",
-        uploaded_by_id=current_user.id,
-    )
-    db.add(doc)
-    db.commit()
-    db.refresh(doc)
-
-    # Upload su SharePoint (sovrascrive il path locale con sp:...)
-    if settings.sharepoint_enabled:
-        from app.sharepoint import upload_cv_file
-        try:
-            sp_path = await upload_cv_file(
-                user_email=current_user.email,
-                doc_id=doc.id,
-                original_filename=file.filename or safe_name,
-                content=content,
-                user_full_name=current_user.full_name or "",
-            )
-            doc.storage_path = f"sp:{sp_path}"
-            db.commit()
-        except Exception as sp_err:
-            # Non blocca — il file è già su disco locale come fallback
-            import logging
-            logging.getLogger(__name__).warning(f"SharePoint upload CV fallito: {sp_err}")
-
-    # ── Senza AI: restituisce subito ──────────────────────────────────────────
-    if not ai_update:
-        return {
-            "document_id":  doc.id,
-            "filename":     doc.original_filename,
-            "tags":         doc.tags or [],
-            "storage_path": doc.storage_path,
-            "ai_updated":   False,
-        }
-
-    # ── Con AI: chiama AI service ─────────────────────────────────────────────
-    try:
-        async with httpx.AsyncClient(timeout=120.0) as client:
-            resp = await client.post(
-                f"{settings.ai_service_url}/parse",
-                json={"file_path": file_path, "document_id": doc.id},
-            )
-            resp.raise_for_status()
-            ai_result = resp.json()
-    except Exception as exc:
-        doc.parse_status = "error"
-        db.commit()
-        raise HTTPException(502, f"Errore servizio AI: {exc}")
-
-    if ai_result.get("status") != "ok" or not ai_result.get("data"):
-        doc.parse_status = "error"
-        db.commit()
-        raise HTTPException(422, ai_result.get("error", "Parsing fallito"))
-
-    doc.ai_raw_output = ai_result["data"]
-    doc.parse_status  = "done"
-    doc.parsed_at     = datetime.utcnow()
-    db.commit()
-
-    cv_full = (
-        db.query(CV)
-        .options(
-            selectinload(CV.skills),
-            selectinload(CV.references),
-            selectinload(CV.educations),
-            selectinload(CV.certifications),
-            selectinload(CV.languages),
-        )
-        .filter(CV.id == cv.id)
-        .first()
-    )
-
-    diff = compute_diff(cv_full, ai_result["data"])
-    diff["document_id"] = doc.id
-    diff["ai_updated"]  = True
-    return diff
+    return {
+        "document_id": doc["id"],
+        "filename": file.filename,
+        "diff": diff,
+    }
 
 
-# ── Endpoint: lista documenti CV dell'utente ──────────────────────────────────
-
-@router.get("/documents")
-def list_documents(
-    current_user: User = Depends(get_current_user),
-    db: Session = Depends(get_db),
-):
-    """Restituisce la lista di tutti i CV caricati dall'utente, dal più recente."""
-    cv = db.query(CV).filter(CV.user_id == current_user.id).first()
-    if not cv:
-        return []
-    docs = (
-        db.query(CVDocument)
-        .filter(CVDocument.cv_id == cv.id)
-        .order_by(CVDocument.uploaded_at.desc())
-        .all()
-    )
-    return [
-        {
-            "id":                d.id,
-            "original_filename": d.original_filename,
-            "uploaded_at":       d.uploaded_at.isoformat() if d.uploaded_at else None,
-            "file_size_bytes":   d.file_size_bytes,
-            "tags":              d.tags or [],
-            "ai_updated":        d.ai_updated or False,
-            "parse_status":      d.parse_status,
-            "storage_path":      d.storage_path or None,
-            "has_file":          bool(d.storage_path),
-        }
-        for d in docs
-    ]
-
-
-# ── Endpoint: download documento CV ──────────────────────────────────────────
-
-@router.get("/documents/{doc_id}/download")
-async def download_document(
-    doc_id: int,
-    current_user: User = Depends(get_current_user),
-    db: Session = Depends(get_db),
-):
-    """Scarica un CV caricato. Redirect su SharePoint o FileResponse locale."""
-    cv = db.query(CV).filter(CV.user_id == current_user.id).first()
-    if not cv:
-        raise HTTPException(404, "CV non trovato")
-
-    doc = db.query(CVDocument).filter(
-        CVDocument.id == doc_id, CVDocument.cv_id == cv.id
-    ).first()
-    if not doc:
-        raise HTTPException(404, "Documento non trovato")
-    if not doc.storage_path:
-        raise HTTPException(404, "File non disponibile per questo documento")
-
-    if doc.storage_path.startswith("sp:"):
-        from app.sharepoint import get_download_url
-        try:
-            url = await get_download_url(doc.storage_path[3:])
-        except Exception as e:
-            raise HTTPException(502, f"Impossibile ottenere URL da SharePoint: {e}")
-        return RedirectResponse(url)
-    else:
-        rel      = doc.storage_path.lstrip("/")
-        abs_path = os.path.join("/app", rel)
-        if not os.path.exists(abs_path):
-            raise HTTPException(404, "File non trovato su disco")
-        return FileResponse(abs_path, filename=doc.original_filename,
-                            media_type="application/octet-stream")
-
-
-# ── Endpoint: elimina documento CV ───────────────────────────────────────────
-
-@router.delete("/documents/{doc_id}", status_code=204)
-async def delete_document(
-    doc_id: int,
-    current_user: User = Depends(get_current_user),
-    db: Session = Depends(get_db),
-):
-    """Elimina un CVDocument (record DB + file su SharePoint o disco)."""
-    cv = db.query(CV).filter(CV.user_id == current_user.id).first()
-    if not cv:
-        raise HTTPException(404, "CV non trovato")
-
-    doc = db.query(CVDocument).filter(
-        CVDocument.id == doc_id, CVDocument.cv_id == cv.id
-    ).first()
-    if not doc:
-        raise HTTPException(404, "Documento non trovato")
-
-    if doc.storage_path:
-        if doc.storage_path.startswith("sp:"):
-            from app.sharepoint import delete_file
-            try:
-                await delete_file(doc.storage_path[3:])
-            except Exception:
-                pass
-        else:
-            rel      = doc.storage_path.lstrip("/")
-            abs_path = os.path.join("/app", rel)
-            if os.path.exists(abs_path):
-                os.remove(abs_path)
-
-    db.delete(doc)
-    db.commit()
-
-
-# ── Endpoint: Apply diff ──────────────────────────────────────────────────────
+# ── Endpoint: apply diff ──────────────────────────────────────────────────────
 
 @router.post("/apply")
-def apply_diff(
+async def apply_diff(
     payload: dict,
-    current_user: User = Depends(get_current_user),
-    db: Session = Depends(get_db),
+    current_user: dict = Depends(get_current_user),
 ):
     """
-    Applica le modifiche selezionate dall'utente dopo la revisione del diff.
-
-    Payload atteso:
-    {
-      document_id: int,
-      profile_updates: { field: value, ... },
-      skills:         { add: [...], update: [...] },
-      references:     { add: [...], update: [...] },
-      educations:     { add: [...], update: [...] },
-      certifications: { add: [...], update: [...] },
-      languages:      { add: [...], update: [...] }
-    }
+    Applica le selezioni dell'utente al profilo STORE.
+    payload: { document_id, profile: [...], skills: [...], references: [...],
+               educations: [...], certifications: [...], languages: [...] }
+    Operazione idempotente: skip su duplicati rilevati per fuzzy matching.
     """
-    cv = (
-        db.query(CV)
-        .options(selectinload(CV.skills), selectinload(CV.references),
-                 selectinload(CV.educations), selectinload(CV.certifications),
-                 selectinload(CV.languages))
-        .filter(CV.user_id == current_user.id)
-        .first()
-    )
-    if not cv:
-        raise HTTPException(404, "CV non trovato")
+    email = current_user["email"]
+    changes = {"profile": 0, "skills": 0, "references": 0,
+               "educations": 0, "certifications": 0, "languages": 0}
 
-    applied: dict[str, int] = {
-        "profile": 0, "skills": 0, "references": 0,
-        "educations": 0, "certifications": 0, "languages": 0,
-    }
+    # ── Profilo scalare ────────────────────────────────────────────────────────
+    for item in payload.get("profile", []):
+        if item.get("selected") == "ai":
+            field = item["field"]
+            value = item["ai_value"]
+            await store.update_cv_profile(email, {field: value})
+            changes["profile"] += 1
 
-    # ── Profilo ──
-    for field, value in (payload.get("profile_updates") or {}).items():
-        if hasattr(cv, field):
-            setattr(cv, field, value or None)
-            applied["profile"] += 1
+    # ── Skills ────────────────────────────────────────────────────────────────
+    existing_skills = store.STORE["skills"].get(email, [])
+    for item in payload.get("skills", []):
+        selected = item.get("selected", "db")
+        if selected == "db":
+            continue
+        ai = item.get("ai") or {}
+        db = item.get("db")
+        name = ai.get("skill_name", "")
+        if not name:
+            continue
+        # skip se già esiste (fuzzy)
+        if any(_sim(s.get("skill_name", ""), name) >= 0.85 for s in existing_skills):
+            # update rating/category se "ai" selezionato su item "changed"
+            if item.get("status") == "changed" and db:
+                await store.update_skill(email, db["id"], {
+                    "category": ai.get("category", db.get("category")),
+                    "rating": ai.get("rating", db.get("rating")),
+                })
+                changes["skills"] += 1
+            continue
+        await store.add_skill(email, {
+            "skill_name": name,
+            "category": ai.get("category", "HARD"),
+            "rating": ai.get("rating"),
+        })
+        # refresh
+        existing_skills = store.STORE["skills"].get(email, [])
+        changes["skills"] += 1
 
-    # ── Competenze ──
-    sk_p = payload.get("skills") or {}
-    existing_skill_names = {s.skill_name.lower() for s in cv.skills}
-    for d in sk_p.get("add", []):
-        if d["skill_name"].lower() in existing_skill_names:
-            continue  # già presente, skip per idempotenza
-        try:
-            cat = SkillCategory(d.get("category", "HARD"))
-        except ValueError:
-            cat = SkillCategory.HARD
-        db.add(CVSkill(cv_id=cv.id, skill_name=d["skill_name"],
-                       category=cat, rating=d.get("rating"), notes=d.get("notes")))
-        existing_skill_names.add(d["skill_name"].lower())
-        applied["skills"] += 1
-    for d in sk_p.get("update", []):
-        sk = db.get(CVSkill, d.get("db_id"))
-        if sk and sk.cv_id == cv.id:
-            if "rating" in d:
-                sk.rating = d["rating"]
-            if "category" in d:
-                try:
-                    sk.category = SkillCategory(d["category"])
-                except ValueError:
-                    pass
-            applied["skills"] += 1
+    # ── Esperienze ────────────────────────────────────────────────────────────
+    existing_exp = store.STORE["experiences"].get(email, [])
+    for item in payload.get("references", []):
+        selected = item.get("selected", "db")
+        if selected == "db":
+            continue
+        ai = item.get("ai") or {}
+        db = item.get("db")
+        company = ai.get("company_name", "")
+        role = ai.get("role", "")
+        if item.get("status") == "changed" and db and selected == "ai":
+            await store.update_experience(email, db["id"], ai)
+            changes["references"] += 1
+        elif item.get("status") == "new":
+            if any(
+                _sim(e.get("company_name", ""), company) >= 0.80
+                and _sim(e.get("role", ""), role) >= 0.70
+                for e in existing_exp
+            ):
+                continue
+            await store.add_experience(email, ai)
+            existing_exp = store.STORE["experiences"].get(email, [])
+            changes["references"] += 1
 
-    # -- Esperienze / Referenze --
-    ref_p = payload.get("references") or {}
-    def _ref_key(company: Optional[str], role: Optional[str], sd=None) -> str:
-        """Chiave idempotenza referenze: azienda|ruolo|anno-inizio.
-        Permette più esperienze nella stessa azienda con ruoli uguali ma anni diversi."""
-        yr = str(_parse_date(sd).year) if _parse_date(sd) else ""
-        return (company or "").lower().strip() + "|" + (role or "").lower().strip() + "|" + yr
+    # ── Education ─────────────────────────────────────────────────────────────
+    existing_edu = store.STORE["educations"].get(email, [])
+    for item in payload.get("educations", []):
+        selected = item.get("selected", "db")
+        if selected == "db":
+            continue
+        ai = item.get("ai") or {}
+        db = item.get("db")
+        inst = ai.get("institution", "")
+        if item.get("status") == "changed" and db and selected == "ai":
+            await store.update_education(email, db["id"], ai)
+            changes["educations"] += 1
+        elif item.get("status") == "new":
+            if any(_sim(e.get("institution", ""), inst) >= 0.80 for e in existing_edu):
+                continue
+            await store.add_education(email, ai)
+            existing_edu = store.STORE["educations"].get(email, [])
+            changes["educations"] += 1
 
-    existing_refs = {_ref_key(r.company_name, r.role, str(r.start_date) if r.start_date else None) for r in cv.references}
-    for d in ref_p.get("add", []):
-        key = _ref_key(d.get("company_name"), d.get("role"), d.get("start_date"))
-        if key in existing_refs:
-            continue  # skip duplicati (idempotente)
-        existing_refs.add(key)
-        db.add(Reference(
-            cv_id=cv.id,
-            company_name=d.get("company_name"),
-            client_name=d.get("client_name"),
-            role=d.get("role"),
-            start_date=_parse_date(d.get("start_date")),
-            end_date=_parse_date(d.get("end_date")),
-            is_current=bool(d.get("is_current", False)),
-            project_description=d.get("project_description"),
-            activities=d.get("activities"),
-            skills_acquired=d.get("skills_acquired") or [],
-        ))
-        applied["references"] += 1
-    for d in ref_p.get("update", []):
-        ref = db.get(Reference, d.get("db_id"))
-        if ref and ref.cv_id == cv.id:
-            for f in ("company_name", "role", "project_description", "activities", "is_current"):
-                if f in d:
-                    setattr(ref, f, d[f])
-            if "start_date" in d:
-                ref.start_date = _parse_date(d["start_date"])
-            if "end_date" in d:
-                ref.end_date = _parse_date(d["end_date"])
-            if "skills_acquired" in d:
-                ref.skills_acquired = d.get("skills_acquired") or []
-            applied["references"] += 1
+    # ── Certifications ────────────────────────────────────────────────────────
+    existing_certs = store.STORE["certifications"].get(email, [])
+    for item in payload.get("certifications", []):
+        selected = item.get("selected", "db")
+        if selected == "db":
+            continue
+        ai = item.get("ai") or {}
+        db = item.get("db")
+        name = ai.get("name", "")
+        if item.get("status") == "changed" and db and selected == "ai":
+            await store.update_certification(email, db["id"], ai)
+            changes["certifications"] += 1
+        elif item.get("status") == "new":
+            if any(_sim(c.get("name", ""), name) >= 0.80 for c in existing_certs):
+                continue
+            await store.add_certification(email, ai)
+            existing_certs = store.STORE["certifications"].get(email, [])
+            changes["certifications"] += 1
 
-    # -- Formazione --
-    edu_p = payload.get("educations") or {}
-    existing_edus = {(e.institution or "").lower() for e in cv.educations}
-    for d in edu_p.get("add", []):
-        inst_key = (d.get("institution") or "").lower()
-        if inst_key in existing_edus:
-            continue  # skip duplicati
-        existing_edus.add(inst_key)
-        # Map degree_type_raw -> DegreeLevel enum
-        raw = (d.get("degree_type_raw") or d.get("degree_level") or "").upper()
-        dl_map = {"DIPLOMA": DegreeLevel.DIPLOMA, "TRIENNALE": DegreeLevel.TRIENNALE,
-                  "MAGISTRALE": DegreeLevel.MAGISTRALE, "DOTTORATO": DegreeLevel.DOTTORATO,
-                  "MASTER": DegreeLevel.MASTER, "CORSO": DegreeLevel.CORSO}
-        deg = next((v for k, v in dl_map.items() if k in raw), None)
-        db.add(Education(
-            cv_id=cv.id,
-            institution=d.get("institution", ""),
-            field_of_study=d.get("field_of_study"),
-            graduation_year=d.get("graduation_year"),
-            grade=d.get("grade"),
-            degree_level=deg,
-        ))
-        applied["educations"] += 1
-    for d in edu_p.get("update", []):
-        edu = db.get(Education, d.get("db_id"))
-        if edu and edu.cv_id == cv.id:
-            for f in ("institution", "field_of_study", "graduation_year", "grade"):
-                if f in d:
-                    setattr(edu, f, d[f])
-            applied["educations"] += 1
+    # ── Languages ─────────────────────────────────────────────────────────────
+    existing_langs = store.STORE["languages"].get(email, [])
+    for item in payload.get("languages", []):
+        selected = item.get("selected", "db")
+        if selected == "db":
+            continue
+        ai = item.get("ai") or {}
+        db = item.get("db")
+        lang_name = ai.get("language_name", "")
+        if item.get("status") == "changed" and db and selected == "ai":
+            await store.update_language(email, db["id"], ai)
+            changes["languages"] += 1
+        elif item.get("status") == "new":
+            if any(_sim(l.get("language_name", ""), lang_name) >= 0.85 for l in existing_langs):
+                continue
+            await store.add_language(email, ai)
+            existing_langs = store.STORE["languages"].get(email, [])
+            changes["languages"] += 1
 
-    # -- Certificazioni --
-    cert_p = payload.get("certifications") or {}
-    existing_certs = {(c.name or "").lower() for c in cv.certifications}
-    for d in cert_p.get("add", []):
-        cert_key = (d.get("name") or "").lower()
-        if cert_key in existing_certs:
-            continue  # skip duplicati
-        existing_certs.add(cert_key)
-        db.add(Certification(
-            cv_id=cv.id,
-            name=d.get("name", ""),
-            issuing_org=d.get("issuing_org"),
-            year=d.get("year"),
-            expiry_date=_parse_date(d.get("expiry_date")),
-            doc_url=d.get("doc_url"),
-            doc_attachment_type=(DocAttachmentType.URL if d.get("doc_url") else DocAttachmentType.NONE),
-        ))
-        applied["certifications"] += 1
-    for d in cert_p.get("update", []):
-        cert = db.get(Certification, d.get("db_id"))
-        if cert and cert.cv_id == cv.id:
-            for f in ("name", "issuing_org", "year"):
-                if f in d:
-                    setattr(cert, f, d[f])
-            if "expiry_date" in d:
-                cert.expiry_date = _parse_date(d["expiry_date"])
-            applied["certifications"] += 1
+    # ── Marca documento come AI-aggiornato ────────────────────────────────────
+    doc_id = payload.get("document_id")
+    if doc_id:
+        await store.update_document(email, doc_id, {"ai_updated": True})
 
-    # ── Lingue ──
-    lang_p = payload.get("languages") or {}
-    existing_langs = {l.language_name.lower() for l in cv.languages}
-    for d in lang_p.get("add", []):
-        if d.get("language_name", "").lower() in existing_langs:
-            continue  # skip duplicates per idempotenza
-        try:
-            level = LanguageLevel(d.get("level")) if d.get("level") else None
-        except ValueError:
-            level = None
-        db.add(Language(cv_id=cv.id, language_name=d.get("language_name", ""), level=level))
-        existing_langs.add(d["language_name"].lower())
-        applied["languages"] += 1
-    for d in lang_p.get("update", []):
-        lang = db.get(Language, d.get("db_id"))
-        if lang and lang.cv_id == cv.id and "level" in d:
-            try:
-                lang.level = LanguageLevel(d["level"]) if d["level"] else None
-            except ValueError:
-                pass
-            applied["languages"] += 1
+    return {"status": "ok", "changes": changes}
 
-    try:
-        db.commit()
-    except IntegrityError as e:
-        db.rollback()
-        raise HTTPException(409, f"Conflitto dati: {str(e.orig)[:120]}") from e
 
-    # Segna il documento come "ai_updated" se almeno una modifica è stata applicata
-    if total > 0:
-        doc_id = payload.get("document_id")
-        if doc_id:
-            doc = db.get(CVDocument, doc_id)
-            if doc and doc.cv_id == cv.id:
-                doc.ai_updated = True
-                db.commit()
+# ── Endpoint: lista documenti utente ──────────────────────────────────────────
 
-    total = sum(applied.values())
-    return {"success": True, "applied_count": total, "sections": applied,
-            "message": f"{total} modifiche applicate con successo"}
+@router.get("/documents")
+async def list_documents(current_user: dict = Depends(get_current_user)):
+    email = current_user["email"]
+    docs = store.STORE["documents"].get(email, [])
+    return docs
+
+
+@router.delete("/documents/{doc_id}")
+async def delete_document(
+    doc_id: str,
+    current_user: dict = Depends(get_current_user),
+):
+    email = current_user["email"]
+    ok = await store.delete_document(email, doc_id)
+    if not ok:
+        raise HTTPException(404, "Documento non trovato")
+    return {"status": "deleted"}

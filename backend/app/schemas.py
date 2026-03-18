@@ -1,14 +1,10 @@
 """
 Pydantic v2 schemas per request/response.
+Nessuna dipendenza da ORM/SQLAlchemy — tutti i tipi sono stringhe o primitivi.
 """
 from datetime import datetime, date
 from typing import Optional, List
-from pydantic import BaseModel, EmailStr, ConfigDict
-
-from app.models import (
-    UserRole, SkillCategory, DegreeLevel, LanguageLevel,
-    AvailabilityStatus, DocAttachmentType
-)
+from pydantic import BaseModel, EmailStr
 
 
 # ── Auth ──────────────────────────────────────────────────────────────────────
@@ -39,7 +35,7 @@ class EntraExchangeRequest(BaseModel):
 class UserBase(BaseModel):
     email: EmailStr
     full_name: str
-    role: UserRole = UserRole.USER
+    role: str = "USER"
     username: Optional[str] = None
     bu_mashfrog: Optional[str] = None
     mashfrog_office: Optional[str] = None
@@ -52,25 +48,32 @@ class UserCreate(UserBase):
 
 class UserUpdate(BaseModel):
     full_name: Optional[str] = None
-    role: Optional[UserRole] = None
+    role: Optional[str] = None
     is_active: Optional[bool] = None
     bu_mashfrog: Optional[str] = None
     mashfrog_office: Optional[str] = None
     hire_date_mashfrog: Optional[date] = None
+    password: Optional[str] = None
 
 
-class UserResponse(UserBase):
-    model_config = ConfigDict(from_attributes=True)
-    id: int
-    is_active: bool
-    created_at: datetime
+class UserResponse(BaseModel):
+    id: str
+    email: str
+    full_name: str
+    role: str = "USER"
+    username: Optional[str] = None
+    bu_mashfrog: Optional[str] = None
+    mashfrog_office: Optional[str] = None
+    hire_date: Optional[str] = None
+    is_active: bool = True
+    created_at: Optional[str] = None
 
 
 # ── Education ─────────────────────────────────────────────────────────────────
 
 class EducationBase(BaseModel):
     institution: str
-    degree_level: Optional[DegreeLevel] = None
+    degree_level: Optional[str] = None
     field_of_study: Optional[str] = None
     graduation_year: Optional[int] = None
     graduation_date: Optional[date] = None
@@ -83,15 +86,14 @@ class EducationCreate(EducationBase):
 
 
 class EducationResponse(EducationBase):
-    model_config = ConfigDict(from_attributes=True)
-    id: int
+    id: str
 
 
 # ── Language ──────────────────────────────────────────────────────────────────
 
 class LanguageBase(BaseModel):
     language_name: str
-    level: Optional[LanguageLevel] = None
+    level: Optional[str] = None
 
 
 class LanguageCreate(LanguageBase):
@@ -99,36 +101,15 @@ class LanguageCreate(LanguageBase):
 
 
 class LanguageResponse(LanguageBase):
-    model_config = ConfigDict(from_attributes=True)
-    id: int
-
-
-# ── CVRole ────────────────────────────────────────────────────────────────────
-
-class CVRoleBase(BaseModel):
-    title: str
-    start_date: Optional[date] = None
-    end_date: Optional[date] = None
-    is_current: bool = False
-    company: Optional[str] = None
-    notes: Optional[str] = None
-
-
-class CVRoleCreate(CVRoleBase):
-    pass
-
-
-class CVRoleResponse(CVRoleBase):
-    model_config = ConfigDict(from_attributes=True)
-    id: int
+    id: str
 
 
 # ── CVSkill ───────────────────────────────────────────────────────────────────
 
 class CVSkillBase(BaseModel):
     skill_name: str
-    category: SkillCategory
-    rating: Optional[int] = None   # 1-5
+    category: str = "HARD"
+    rating: Optional[int] = None
     notes: Optional[str] = None
 
 
@@ -137,11 +118,10 @@ class CVSkillCreate(CVSkillBase):
 
 
 class CVSkillResponse(CVSkillBase):
-    model_config = ConfigDict(from_attributes=True)
-    id: int
+    id: str
 
 
-# ── Reference ─────────────────────────────────────────────────────────────────
+# ── Reference (esperienze) ────────────────────────────────────────────────────
 
 class ReferenceBase(BaseModel):
     start_date: Optional[date] = None
@@ -152,7 +132,6 @@ class ReferenceBase(BaseModel):
     role: Optional[str] = None
     project_description: Optional[str] = None
     activities: Optional[str] = None
-    skills_acquired: Optional[List[str]] = None
     sort_order: int = 0
 
 
@@ -161,8 +140,7 @@ class ReferenceCreate(ReferenceBase):
 
 
 class ReferenceResponse(ReferenceBase):
-    model_config = ConfigDict(from_attributes=True)
-    id: int
+    id: str
 
 
 # ── Certification ─────────────────────────────────────────────────────────────
@@ -175,11 +153,10 @@ class CertificationBase(BaseModel):
     version: Optional[str] = None
     expiry_date: Optional[date] = None
     notes: Optional[str] = None
-    doc_attachment_type: DocAttachmentType = DocAttachmentType.NONE
+    doc_attachment_type: str = "NONE"
     doc_url: Optional[str] = None
     has_formal_cert: bool = True
     credly_badge_id: Optional[str] = None
-    badge_image_url: Optional[str] = None
     tags: Optional[List[str]] = None
 
 
@@ -188,28 +165,26 @@ class CertificationCreate(CertificationBase):
 
 
 class CertificationResponse(CertificationBase):
-    model_config = ConfigDict(from_attributes=True)
-    id: int
+    id: str
     uploaded_file_path: Optional[str] = None
 
 
 # ── CVDocument ────────────────────────────────────────────────────────────────
 
 class CVDocumentResponse(BaseModel):
-    model_config = ConfigDict(from_attributes=True)
-    id: int
+    id: str
     original_filename: str
-    sharepoint_url: Optional[str]
-    mime_type: str
-    file_size_bytes: Optional[int]
-    uploaded_at: datetime
-    parse_status: str
+    doc_type: str = "UPLOAD"
+    sharepoint_path: Optional[str] = None
+    sharepoint_url: Optional[str] = None
+    upload_date: Optional[str] = None
+    ai_updated: bool = False
+    tags: Optional[List[str]] = None
 
 
-# ── CV (completo) ─────────────────────────────────────────────────────────────
+# ── CV Update ─────────────────────────────────────────────────────────────────
 
 class CVUpdate(BaseModel):
-    # CV fields
     birth_date: Optional[date] = None
     birth_place: Optional[str] = None
     residence_city: Optional[str] = None
@@ -218,58 +193,62 @@ class CVUpdate(BaseModel):
     phone: Optional[str] = None
     linkedin_url: Optional[str] = None
     first_employment_date: Optional[date] = None
-    availability_status: Optional[AvailabilityStatus] = None
-    # User-level fields (stored on User model, updated via same endpoint)
+    availability_status: Optional[str] = None
     hire_date_mashfrog: Optional[date] = None
     mashfrog_office: Optional[str] = None
     bu_mashfrog: Optional[str] = None
 
 
-class CVResponse(BaseModel):
-    model_config = ConfigDict(from_attributes=True)
-    id: int
-    user_id: int
-    birth_date: Optional[date]
-    birth_place: Optional[str]
-    residence_city: Optional[str]
-    title: Optional[str]
-    summary: Optional[str]
-    phone: Optional[str]
-    linkedin_url: Optional[str]
-    first_employment_date: Optional[date]
-    availability_status: AvailabilityStatus
-    completeness_score: float
+# ── CV Full Response ──────────────────────────────────────────────────────────
+
+class CVFullResponse(BaseModel):
+    """Profilo CV completo con tutti i sotto-oggetti e campi utente."""
+    email: str
+    # Profilo
+    title: Optional[str] = None
+    summary: Optional[str] = None
+    phone: Optional[str] = None
+    linkedin_url: Optional[str] = None
+    birth_date: Optional[str] = None
+    birth_place: Optional[str] = None
+    residence_city: Optional[str] = None
+    first_employment_date: Optional[str] = None
+    availability_status: str = "IN_STAFF"
+    completeness_score: float = 0.0
+    updated_at: Optional[str] = None
+    # Campi utente
+    full_name: Optional[str] = None
+    hire_date_mashfrog: Optional[str] = None
+    mashfrog_office: Optional[str] = None
+    bu_mashfrog: Optional[str] = None
+    # Sotto-collezioni
     educations: List[EducationResponse] = []
     languages: List[LanguageResponse] = []
-    roles: List[CVRoleResponse] = []
     skills: List[CVSkillResponse] = []
     references: List[ReferenceResponse] = []
     certifications: List[CertificationResponse] = []
     documents: List[CVDocumentResponse] = []
-    updated_at: datetime
 
 
-# ── Search (API pubblica) ─────────────────────────────────────────────────────
+# ── Search ────────────────────────────────────────────────────────────────────
 
 class ResourceSummary(BaseModel):
-    """Schema per API pubblica consumata da IT_RESOURCE_MGMT e altri servizi."""
-    model_config = ConfigDict(from_attributes=True)
-    id: int
+    id: str
     full_name: str
     email: str
-    username: Optional[str]
-    bu_mashfrog: Optional[str]
-    mashfrog_office: Optional[str]
-    title: Optional[str]
-    availability_status: Optional[AvailabilityStatus]
+    username: Optional[str] = None
+    bu_mashfrog: Optional[str] = None
+    mashfrog_office: Optional[str] = None
+    title: Optional[str] = None
+    availability_status: Optional[str] = None
     skills: List[CVSkillResponse] = []
 
 
-# ── Autocomplete (suggest) ────────────────────────────────────────────────────
+# ── Autocomplete ──────────────────────────────────────────────────────────────
 
 class SkillSuggestion(BaseModel):
     skill_name: str
-    category: SkillCategory
+    category: str
     count: int
 
 
@@ -279,28 +258,3 @@ class CertSuggestion(BaseModel):
     issuing_org: Optional[str] = None
     version: Optional[str] = None
     count: int = 1
-
-
-# ── Skill Taxonomy ────────────────────────────────────────────────────────────
-
-class SkillTaxonomyResponse(BaseModel):
-    model_config = ConfigDict(from_attributes=True)
-    id: int
-    name: str
-    category: Optional[SkillCategory]
-    usage_count: int
-
-
-# ── CVFullResponse (CV + campi User) ─────────────────────────────────────────
-
-class CVFullResponse(CVResponse):
-    """CVResponse arricchito con campi dell'utente (sede, data assunzione, BU)."""
-    hire_date_mashfrog: Optional[date] = None
-    mashfrog_office: Optional[str] = None
-    bu_mashfrog: Optional[str] = None
-    full_name: Optional[str] = None
-
-
-# (SkillSuggestion e CertSuggestion definiti sopra — nessun duplicato)
-
-

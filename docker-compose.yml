@@ -1,24 +1,5 @@
 services:
 
-  # ── PostgreSQL ─────────────────────────────────────────────────────────────
-  db:
-    image: postgres:15-alpine
-    container_name: cv_mgmt_db
-    restart: unless-stopped
-    environment:
-      POSTGRES_DB: ${POSTGRES_DB:-cv_management}
-      POSTGRES_USER: ${POSTGRES_USER:-cv_user}
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-cv_password}
-    ports:
-      - "5433:5432"          # porta host 5433 per non collidere con IT_RESOURCE_MGMT (5432)
-    volumes:
-      - postgres_data:/var/lib/postgresql/data
-    healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-cv_user} -d ${POSTGRES_DB:-cv_management}"]
-      interval: 5s
-      timeout: 5s
-      retries: 10
-
   # ── Backend FastAPI ────────────────────────────────────────────────────────
   backend:
     build: ./backend
@@ -26,13 +7,9 @@ services:
     restart: unless-stopped
     env_file: .env
     environment:
-      DATABASE_URL: postgresql+psycopg2://${POSTGRES_USER:-cv_user}:${POSTGRES_PASSWORD:-cv_password}@db:5432/${POSTGRES_DB:-cv_management}
       CORS_ORIGINS: "http://localhost:8082,http://localhost:5174"
       AI_SERVICE_URL: http://ai-services:8000
       UPLOAD_DIR: /app/uploads
-    depends_on:
-      db:
-        condition: service_healthy
     ports:
       - "8002:8000"          # porta host 8002 (8000=IT_RM, 8001=YATO)
     volumes:
@@ -42,7 +19,7 @@ services:
       interval: 5s
       timeout: 5s
       retries: 15
-      start_period: 20s
+      start_period: 30s
 
   # ── AI Services (CV parsing) ───────────────────────────────────────────────
   ai-services:
@@ -79,5 +56,4 @@ services:
       - "8082:80"            # porta host 8082 (8080=IT_RM)
 
 volumes:
-  postgres_data:             # dati PostgreSQL persistenti
   uploads_data:              # documenti CV caricati (condiviso tra backend e ai-services)

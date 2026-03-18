@@ -1,104 +1,32 @@
 """
-CV Management System — Backend FastAPI
+CV Management System — Backend FastAPI (Excel backend)
 Entry point: lifespan, middleware, router registration, health endpoint.
 """
-import os
 import logging
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from app.database import engine, Base, SessionLocal, settings
-from app.models import UserRole  # noqa: F401 — ensure enum registered
-from app.seed import seed_data
-from app.seed_excel import seed_from_excel
+import app.excel_store as store
+from app.excel_store import settings
 
 logger = logging.getLogger(__name__)
 
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # Startup
-    Base.metadata.create_all(bind=engine)
-    ensure_schema_compatibility()
-    os.makedirs(settings.upload_dir, exist_ok=True)
-    with SessionLocal() as db:
-        seed_data(db)           # crea admin + demo users, poi sync_all_passwords
-        seed_from_excel(db)     # crea utenti Excel con PLACEHOLDER_HASH
-        from app.seed import _sync_all_passwords
-        _sync_all_passwords(db) # ri-sincronizza TUTTI (inclusi quelli appena creati da Excel)
-
-    # SharePoint health-check (non bloccante)
-    if settings.sharepoint_enabled:
-        from app.sharepoint import verify_connection
-        result = await verify_connection()
-        if result["ok"]:
-            logger.info(f"SharePoint OK — drive_id={result['drive_id']}")
-        else:
-            logger.warning(f"SharePoint NON raggiungibile: {result['error']}")
-    else:
-        logger.info("SharePoint non configurato — uso storage locale")
+    # Startup — carica dati da SharePoint (o file locale)
+    try:
+        await store.init_store()
+        logger.info("STORE inizializzato correttamente")
+        await store.seed_if_empty()
+    except Exception as e:
+        logger.error(f"Errore inizializzazione STORE: {e}")
+        # Avvia comunque — lo STORE sarà vuoto, gli endpoint gestiscono casi empty
 
     yield
-    # Shutdown (nessuna azione necessaria)
-
-
-def ensure_schema_compatibility() -> None:
-    """
-    Migrazioni DDL idempotenti — aggiungere qui colonne/enum mancanti
-    senza rompere installazioni esistenti.
-    Pattern copiato da IT_RESOURCE_MGMT.
-    """
-    from sqlalchemy import text
-    with engine.connect() as conn:
-        # Sprint 5 — Credly badge fields
-        conn.execute(text(
-            "ALTER TABLE certifications ADD COLUMN IF NOT EXISTS credly_badge_id VARCHAR(200)"
-        ))
-        conn.execute(text(
-            "ALTER TABLE certifications ADD COLUMN IF NOT EXISTS badge_image_url VARCHAR(1000)"
-        ))
-
-        # Sprint 6 — uploaded_file_path su certifications
-        conn.execute(text(
-            "ALTER TABLE certifications ADD COLUMN IF NOT EXISTS uploaded_file_path VARCHAR(1000)"
-        ))
-
-        # Sprint 6 — tags liberi su certifications
-        conn.execute(text(
-            "ALTER TABLE certifications ADD COLUMN IF NOT EXISTS tags TEXT[]"
-        ))
-
-        # Sprint 6 — nuovi campi CVDocument
-        conn.execute(text(
-            "ALTER TABLE cv_documents ADD COLUMN IF NOT EXISTS storage_path VARCHAR(1000)"
-        ))
-        conn.execute(text(
-            "ALTER TABLE cv_documents ADD COLUMN IF NOT EXISTS tags TEXT[]"
-        ))
-        conn.execute(text(
-            "ALTER TABLE cv_documents ADD COLUMN IF NOT EXISTS ai_updated BOOLEAN DEFAULT FALSE"
-        ))
-
-        conn.commit()
-
-    # Sprint 6 — nuovi valori AvailabilityStatus
-    # ALTER TYPE ADD VALUE richiede AUTOCOMMIT (non può stare in una transazione)
-    with engine.connect().execution_options(isolation_level="AUTOCOMMIT") as ac:
-        for val in ("IN_HIRING", "IN_STAFF", "DIMESSO"):
-            try:
-                ac.execute(text(f"ALTER TYPE availabilitystatus ADD VALUE IF NOT EXISTS '{val}'"))
-            except Exception:
-                pass  # già presente
-
-    # Sprint 6 — migra vecchi valori → nuovi (connessione separata post-commit enum)
-    with engine.connect() as conn3:
-        conn3.execute(text(
-            "UPDATE cvs SET availability_status = 'IN_STAFF'::availabilitystatus "
-            "WHERE availability_status::text IN ('DISPONIBILE', 'OCCUPATO')"
-        ))
-        conn3.commit()
-
+    # Shutdown — nessuna azione necessaria (tutti i write sono già persistiti)
 
 
 app = FastAPI(
@@ -119,28 +47,25 @@ app.add_middleware(
 )
 
 # ── Router registration ───────────────────────────────────────────────────────
-from app.routers import auth  # noqa: E402
+from app.routers import auth
 app.include_router(auth.router, prefix="/auth", tags=["auth"])
 
-# TODO Sprint 1: users router
-# from app.routers import users
-# app.include_router(users.router, prefix="/users", tags=["users"])
+from app.routers import users
+app.include_router(users.router, prefix="/users", tags=["users"])
 
 from app.routers import cv
 app.include_router(cv.router, prefix="/cv", tags=["cv"])
 
-# TODO Sprint 2: skills router
-# from app.routers import skills
-# app.include_router(skills.router, prefix="/skills", tags=["skills"])
+from app.routers import skills
+app.include_router(skills.router, prefix="/skills", tags=["skills"])
 
 from app.routers import upload
 app.include_router(upload.router, prefix="/upload", tags=["upload"])
 
-# TODO Sprint 4: search + API pubblica
-# from app.routers import search
-# app.include_router(search.router, prefix="/api/v1", tags=["public-api"])
+from app.routers import search
+app.include_router(search.router, prefix="/api/v1", tags=["public-api"])
 
-from app.routers import export  # noqa: E402
+from app.routers import export
 app.include_router(export.router, prefix="/export", tags=["export"])
 
 

@@ -1,7 +1,7 @@
 """
-Router /export — Sprint 5.
-GET /export/templates       → lista template disponibili in templates/docx/
-GET /export/cv/docx         → genera e scarica il CV come Word
+Router /export — Sprint 5 (Excel backend).
+GET /export/templates    → lista template disponibili in templates/docx/
+GET /export/cv/docx      → genera e scarica il CV come Word
 """
 import copy
 import io
@@ -14,11 +14,10 @@ import httpx
 from docxtpl import DocxTemplate
 from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import StreamingResponse
-from sqlalchemy.orm import Session, selectinload
 
-from app.database import get_db
+import app.excel_store as store
+from app.excel_store import settings
 from app.deps import get_current_user
-from app.models import CV, User
 
 router = APIRouter()
 
@@ -39,7 +38,7 @@ def _list_templates_on_disk() -> list:
         if len(parts) < 3:
             continue
         lang = parts[1].upper()     # IT | EN
-        display = " ".join(parts[2:])  # Standard Mashfrog v1
+        display = " ".join(parts[2:])
         result.append({
             "filename":     f.name,
             "language":     lang,
@@ -50,25 +49,28 @@ def _list_templates_on_disk() -> list:
 
 
 def _sort_refs(refs: list) -> list:
-    """end_date DESC NULLS FIRST → start_date DESC  (identico alla UI)."""
+    """end_date DESC NULLS FIRST → start_date DESC."""
     def key(r):
-        end   = r.end_date.isoformat()[:7]   if r.end_date   else "9999-99"
-        start = r.start_date.isoformat()[:7] if r.start_date else ""
+        end   = (r.get("end_date")   or "9999-99")[:7]
+        start = (r.get("start_date") or "")[:7]
         return (end, start)
     return sorted(refs, key=key, reverse=True)
 
 
-def _fmt_date(d) -> Optional[str]:
-    """date → 'MM/YYYY' oppure None."""
-    if d is None:
+def _fmt_date(d: Optional[str]) -> Optional[str]:
+    """'YYYY-MM-DD' → 'MM/YYYY' oppure None."""
+    if not d:
         return None
     try:
-        return d.strftime("%m/%Y")
+        parts = str(d).strip().split("-")
+        if len(parts) >= 2:
+            return f"{parts[1]}/{parts[0]}"
+        return str(d)
     except Exception:
         return str(d)
 
 
-def _rating_stars(rating: Optional[int]) -> str:
+def _rating_stars(rating) -> str:
     """1-5 → stringa ★★★★☆."""
     if not rating:
         return ""
@@ -76,44 +78,46 @@ def _rating_stars(rating: Optional[int]) -> str:
     return "★" * r + "☆" * (5 - r)
 
 
-def _build_context(cv: CV, user: User) -> dict:
+def _build_context(email: str) -> dict:
     """
     Costruisce il contesto Jinja2 con tutti i campi e alias per compatibilità
     tra Template_IT_Standard, Template_EN_Standard e Template_IT_Esempio.
     """
+    user = store.STORE["users"].get(email, {})
+    cv = store.STORE["cv_profiles"].get(email, {})
+
     # ── Esperienze ────────────────────────────────────────────────────────────
-    sorted_refs = _sort_refs(cv.references or [])
+    refs = store.STORE["experiences"].get(email, [])
+    sorted_refs = _sort_refs(refs)
     experiences = []
     for ref in sorted_refs:
-        start_fmt = _fmt_date(ref.start_date) or ""
-        end_fmt   = _fmt_date(ref.end_date)
+        start_fmt = _fmt_date(ref.get("start_date")) or ""
+        end_fmt   = _fmt_date(ref.get("end_date"))
         experiences.append({
-            # nomi usati nei template Standard v1
-            "company":              ref.company_name or "",
-            "start_date":           start_fmt,
-            "end_date_fmt":         end_fmt,
-            # alias aggiuntivi per compatibilità altri template
-            "company_name":         ref.company_name or "",
-            "client_name":          ref.client_name  or "",
-            "role":                 ref.role          or "",
-            "start_date_fmt":       start_fmt,
-            "project_description":  ref.project_description or "",
-            "activities":           ref.activities    or "",
-            "skills_csv":           ", ".join(ref.skills_acquired or []),
-            "skills_acquired":      ref.skills_acquired or [],
+            "company":             ref.get("company_name") or "",
+            "company_name":        ref.get("company_name") or "",
+            "client_name":         ref.get("client_name")  or "",
+            "role":                ref.get("role")          or "",
+            "start_date":          start_fmt,
+            "start_date_fmt":      start_fmt,
+            "end_date_fmt":        end_fmt,
+            "project_description": ref.get("project_description") or "",
+            "activities":          ref.get("activities")    or "",
+            "skills_csv":          "",
+            "skills_acquired":     [],
         })
 
     # ── Competenze ────────────────────────────────────────────────────────────
     skills_hard, skills_soft = [], []
-    for sk in sorted(cv.skills or [], key=lambda x: x.skill_name):
+    for sk in sorted(store.STORE["skills"].get(email, []), key=lambda x: x.get("skill_name", "")):
         entry = {
-            "skill_name":   sk.skill_name,
-            "name":         sk.skill_name,       # alias Template_IT_Esempio
-            "category":     sk.category.value if sk.category else "",
-            "rating":       sk.rating or 0,
-            "rating_stars": _rating_stars(sk.rating),
+            "skill_name":   sk.get("skill_name", ""),
+            "name":         sk.get("skill_name", ""),
+            "category":     sk.get("category", ""),
+            "rating":       sk.get("rating") or 0,
+            "rating_stars": _rating_stars(sk.get("rating")),
         }
-        if sk.category and sk.category.value == "HARD":
+        if sk.get("category") == "HARD":
             skills_hard.append(entry)
         else:
             skills_soft.append(entry)
@@ -121,64 +125,68 @@ def _build_context(cv: CV, user: User) -> dict:
     # ── Formazione ────────────────────────────────────────────────────────────
     educations = [
         {
-            "institution":    edu.institution,
-            "degree_level":   edu.degree_level.value if edu.degree_level else "",
-            "degree_type":    edu.degree_level.value if edu.degree_level else "",  # alias
-            "field_of_study": edu.field_of_study or "",
-            "graduation_year": edu.graduation_year or "",
-            "end_year":        edu.graduation_year or "",   # alias
+            "institution":     edu.get("institution", ""),
+            "degree_level":    edu.get("degree_level") or "",
+            "degree_type":     edu.get("degree_level") or "",
+            "field_of_study":  edu.get("field_of_study") or "",
+            "graduation_year": edu.get("graduation_year") or "",
+            "end_year":        edu.get("graduation_year") or "",
             "start_year":      "",
-            "grade":           edu.grade  or "",
-            "notes":           edu.notes  or "",
+            "grade":           edu.get("grade") or "",
+            "notes":           edu.get("notes") or "",
         }
-        for edu in sorted(cv.educations or [], key=lambda e: e.graduation_year or 9999)
+        for edu in sorted(
+            store.STORE["educations"].get(email, []),
+            key=lambda e: e.get("graduation_year") or 9999
+        )
     ]
 
     # ── Lingue ────────────────────────────────────────────────────────────────
     languages = [
         {
-            "language_name": lang.language_name,
-            "language":      lang.language_name,   # alias Template_IT_Esempio
-            "level":         lang.level.value if lang.level else "",
+            "language_name": lang.get("language_name", ""),
+            "language":      lang.get("language_name", ""),
+            "level":         lang.get("level") or "",
             "notes":         "",
         }
-        for lang in (cv.languages or [])
+        for lang in store.STORE["languages"].get(email, [])
     ]
 
     # ── Certificazioni ────────────────────────────────────────────────────────
     certifications = [
         {
-            "name":        cert.name,
-            "cert_code":   cert.cert_code   or "",
-            "issuing_org": cert.issuing_org or "",
-            "year":        cert.year        or "",
-            "issue_date":  cert.year        or "",   # alias Template_IT_Esempio
-            "expiry_date": _fmt_date(cert.expiry_date) or "",
-            "version":     cert.version     or "",
-            "doc_url":     cert.doc_url     or "",
+            "name":        cert.get("name", ""),
+            "cert_code":   cert.get("cert_code")   or "",
+            "issuing_org": cert.get("issuing_org") or "",
+            "year":        cert.get("year")        or "",
+            "issue_date":  cert.get("year")        or "",
+            "expiry_date": _fmt_date(cert.get("expiry_date")) or "",
+            "version":     cert.get("version")     or "",
+            "doc_url":     cert.get("doc_url")     or "",
         }
-        for cert in sorted(cv.certifications or [], key=lambda x: -(x.year or 0))
+        for cert in sorted(
+            store.STORE["certifications"].get(email, []),
+            key=lambda x: -(x.get("year") or 0)
+        )
     ]
 
     return {
-        # Anagrafica
-        "full_name":          user.full_name          or "",
-        "email":              user.email              or "",
-        "job_title":          cv.title                or "",
-        "phone":              cv.phone                or "",
-        "linkedin_url":       cv.linkedin_url         or "",
-        "location":           cv.residence_city       or "",
-        "residence_city":     cv.residence_city       or "",
-        "birth_date":         _fmt_date(cv.birth_date) or "",
-        "summary":            cv.summary              or "",
-        "hire_date_mashfrog": _fmt_date(user.hire_date_mashfrog) or "",
-        "mashfrog_office":    user.mashfrog_office     or "",
-        "bu_mashfrog":        user.bu_mashfrog         or "",
-        # Sezioni
+        "full_name":          user.get("full_name") or "",
+        "email":              email,
+        "job_title":          cv.get("title") or "",
+        "phone":              cv.get("phone") or "",
+        "linkedin_url":       cv.get("linkedin_url") or "",
+        "location":           cv.get("residence_city") or "",
+        "residence_city":     cv.get("residence_city") or "",
+        "birth_date":         _fmt_date(cv.get("birth_date")) or "",
+        "summary":            cv.get("summary") or "",
+        "hire_date_mashfrog": _fmt_date(user.get("hire_date_mashfrog")) or "",
+        "mashfrog_office":    user.get("mashfrog_office") or "",
+        "bu_mashfrog":        user.get("bu_mashfrog") or "",
         "experiences":        experiences,
         "skills_hard":        skills_hard,
         "skills_soft":        skills_soft,
-        "skills":             skills_hard + skills_soft,   # alias Template_IT_Esempio
+        "skills":             skills_hard + skills_soft,
         "educations":         educations,
         "languages":          languages,
         "certifications":     certifications,
@@ -186,10 +194,7 @@ def _build_context(cv: CV, user: User) -> dict:
 
 
 async def _translate_to_english(context: dict, api_key: str) -> dict:
-    """
-    Traduce in inglese i campi testuali tramite OpenAI gpt-4o-mini.
-    Tutte le chiamate vengono raggruppate in un unico request batch.
-    """
+    """Traduce in inglese i campi testuali tramite OpenAI gpt-4o-mini."""
     to_translate: dict = {}
 
     if context.get("summary"):
@@ -229,7 +234,6 @@ async def _translate_to_english(context: dict, api_key: str) -> dict:
         raise HTTPException(502, f"Traduzione AI fallita: {resp.text[:200]}")
 
     translated = json.loads(resp.json()["choices"][0]["message"]["content"])
-
     ctx = copy.deepcopy(context)
     if "summary"   in translated: ctx["summary"]   = translated["summary"]
     if "job_title" in translated: ctx["job_title"] = translated["job_title"]
@@ -238,7 +242,6 @@ async def _translate_to_english(context: dict, api_key: str) -> dict:
             exp["project_description"] = translated[f"exp_{i}_pd"]
         if f"exp_{i}_act" in translated:
             exp["activities"] = translated[f"exp_{i}_act"]
-
     return ctx
 
 
@@ -253,49 +256,28 @@ def list_templates():
 @router.get("/cv/docx")
 async def export_cv_docx(
     template: str = Query(..., description="Nome file template es. Template_IT_Standard_Mashfrog_v1.docx"),
-    current_user: User = Depends(get_current_user),
-    db: Session = Depends(get_db),
+    current_user: dict = Depends(get_current_user),
 ):
     """Genera e scarica il CV dell'utente autenticato in formato Word."""
-
-    # Sicurezza: path traversal + solo file dalla dir autorizzata
     if ".." in template or not template.startswith("Template_") or not template.endswith(".docx"):
         raise HTTPException(400, "Nome template non valido")
     template_path = TEMPLATES_DIR / template
     if not template_path.exists():
         raise HTTPException(404, f"Template '{template}' non trovato")
 
-    # Carica CV con tutte le relazioni
-    cv = (
-        db.query(CV)
-        .options(
-            selectinload(CV.skills),
-            selectinload(CV.educations),
-            selectinload(CV.languages),
-            selectinload(CV.references),
-            selectinload(CV.certifications),
-        )
-        .filter(CV.user_id == current_user.id)
-        .first()
-    )
-    if not cv:
-        raise HTTPException(404, "CV non trovato per l'utente corrente")
+    email = current_user["email"]
 
-    # Lingua dal nome file: Template_IT_… → "IT", Template_EN_… → "EN"
-    parts   = template.split("_")
+    parts    = template.split("_")
     language = parts[1].upper() if len(parts) > 1 else "IT"
 
-    # Costruisce contesto
-    context = _build_context(cv, current_user)
+    context = _build_context(email)
 
-    # Traduce se template EN
     if language == "EN":
         api_key = os.environ.get("OPENAI_API_KEY", "")
         if not api_key:
             raise HTTPException(500, "OPENAI_API_KEY non configurata — impossibile tradurre")
         context = await _translate_to_english(context, api_key)
 
-    # Render docxtpl
     tpl = DocxTemplate(str(template_path))
     tpl.render(context)
 
@@ -303,8 +285,7 @@ async def export_cv_docx(
     tpl.save(output)
     output.seek(0)
 
-    # Nome file output: CV_NomeCognome_Standard_Mashfrog_v1.docx
-    user_slug  = (current_user.full_name or "cv").replace(" ", "_")
+    user_slug  = (current_user.get("full_name") or "cv").replace(" ", "_")
     tmpl_slug  = template.replace(".docx", "").replace("Template_IT_", "").replace("Template_EN_", "")
     filename   = f"CV_{user_slug}_{tmpl_slug}.docx"
 
