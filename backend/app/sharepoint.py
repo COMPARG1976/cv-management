@@ -74,6 +74,8 @@ async def _get_token() -> str:
 async def _get_drive_id() -> str:
     """
     Trova il drive ID della Document Library configurata (es. "Documenti").
+    Con Sites.Selected il formato path-URL non funziona per /drives: bisogna
+    prima risolvere il site ID e poi usarlo per listare i drive.
     Il risultato e' cachato per tutta la durata del processo.
     """
     global _drive_id_cache
@@ -85,8 +87,18 @@ async def _get_drive_id() -> str:
     drive_name = settings.sharepoint_drive_name
 
     async with httpx.AsyncClient(timeout=15) as client:
+        # Step 1: ottieni il site ID dal path URL (funziona con Sites.Selected)
+        site_resp = await client.get(
+            f"https://graph.microsoft.com/v1.0/sites/{host}:{site_path}",
+            headers={"Authorization": f"Bearer {token}"},
+        )
+        site_resp.raise_for_status()
+        site_id = site_resp.json()["id"]
+        logger.info(f"SharePoint: site_id={site_id[:30]}...")
+
+        # Step 2: lista i drive usando il site ID numerico
         resp = await client.get(
-            f"https://graph.microsoft.com/v1.0/sites/{host}:{site_path}/drives",
+            f"https://graph.microsoft.com/v1.0/sites/{site_id}/drives",
             headers={"Authorization": f"Bearer {token}"},
         )
         resp.raise_for_status()
