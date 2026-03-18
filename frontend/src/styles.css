@@ -344,7 +344,7 @@ tr:hover td { background: var(--color-primary-light); }
   background: var(--color-surface);
   border-radius: var(--radius);
   padding: 28px;
-  width: 520px;
+  width: 680px;
   max-width: 95vw;
   max-height: 90vh;
   overflow-y: auto;

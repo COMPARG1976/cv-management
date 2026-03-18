@@ -648,7 +648,7 @@ function AnagraficaTab({ token, cv, setCV, hints = {} }) {
           </div>
           <div className="form-group">
             <label>Sommario professionale</label>
-            <textarea rows={4} value={form.summary} onChange={e => upd("summary", e.target.value)} />
+            <textarea rows={6} value={form.summary} onChange={e => upd("summary", e.target.value)} />
           </div>
         </Modal>
       )}
@@ -926,11 +926,11 @@ function EsperienzeTab({ token, cv, setCV, hints = {} }) {
       </div>
       <div className="form-group">
         <label>Descrizione progetto</label>
-        <textarea rows={3} value={form.project_description} onChange={e => upd("project_description", e.target.value)} />
+        <textarea rows={7} value={form.project_description} onChange={e => upd("project_description", e.target.value)} />
       </div>
       <div className="form-group">
         <label>Attività svolte</label>
-        <textarea rows={2} value={form.activities} onChange={e => upd("activities", e.target.value)} />
+        <textarea rows={5} value={form.activities} onChange={e => upd("activities", e.target.value)} />
       </div>
     </>
   );
@@ -963,12 +963,12 @@ function EsperienzeTab({ token, cv, setCV, hints = {} }) {
                   {r.is_current ? "In corso" : <DateStr value={r.end_date} />}
                 </div>
                 {r.project_description && (
-                  <div style={{ fontSize: 12, marginTop: 4, color: "var(--color-text-muted)" }}>
+                  <div style={{ fontSize: 12, marginTop: 6, color: "var(--color-text-muted)", lineHeight: 1.5, whiteSpace: "pre-wrap" }}>
                     <strong>Progetto:</strong> {r.project_description}
                   </div>
                 )}
                 {r.activities && (
-                  <div style={{ fontSize: 12, marginTop: 2, color: "var(--color-text-muted)" }}>
+                  <div style={{ fontSize: 12, marginTop: 4, color: "var(--color-text-muted)", lineHeight: 1.5, whiteSpace: "pre-wrap" }}>
                     <strong>Attività:</strong> {r.activities}
                   </div>
                 )}
@@ -1687,7 +1687,7 @@ function CertificazioniTab({ token, cv, setCV, hints = {} }) {
 
           <div className="form-group">
             <label>Note</label>
-            <input value={form.notes} onChange={e => upd("notes", e.target.value)} />
+            <textarea rows={3} value={form.notes} onChange={e => upd("notes", e.target.value)} />
           </div>
         </Modal>
       )}
