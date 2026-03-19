@@ -261,6 +261,10 @@ export async function listExportTemplates(token) {
   return apiFetch("/export/templates", {}, token);
 }
 
+export async function validateExportTemplates(token) {
+  return apiFetch("/export/templates/validate", {}, token);
+}
+
 export async function exportCVDocx(token, templateFilename) {
   const res = await fetch(
     `${BASE_URL}/export/cv/docx?template=${encodeURIComponent(templateFilename)}`,

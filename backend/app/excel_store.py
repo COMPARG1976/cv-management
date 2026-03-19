@@ -83,8 +83,9 @@ settings = Settings()
 # COSTANTI SHEET
 # ═══════════════════════════════════════════════════════════════════════════════
 
-SHEET_USERS        = "Users"
-SHEET_CVPROFILES   = "CVProfiles"
+SHEET_STAFF        = "Staff"      # foglio unificato Users + CVProfiles
+SHEET_USERS        = "Users"      # legacy (lettura backward-compat)
+SHEET_CVPROFILES   = "CVProfiles" # legacy (lettura backward-compat)
 SHEET_SKILLS       = "Skills"
 SHEET_EDUCATIONS   = "Educations"
 SHEET_EXPERIENCES  = "Experiences"
@@ -95,7 +96,17 @@ SHEET_REF_BU       = "REF - BU"
 SHEET_REF_CERTTAGS = "REF - CertTags"
 SHEET_REF_SKILLS   = "REF - Skills"
 
+# Campi utente (account) nel foglio Staff
+_STAFF_USER_FIELDS  = ["id","email","full_name","username","role",
+                        "is_active","bu_mashfrog","mashfrog_office","hire_date",
+                        "created_at","updated_at"]
+# Campi profilo CV nel foglio Staff (cv_updated_at = updated_at di cv_profiles)
+_STAFF_CV_FIELDS    = ["title","summary","phone","linkedin_url","birth_date",
+                        "birth_place","residence_city","first_employment_date",
+                        "availability_status","cv_updated_at"]
+
 HEADERS = {
+    SHEET_STAFF:        _STAFF_USER_FIELDS + _STAFF_CV_FIELDS,
     SHEET_USERS:        ["id","email","full_name","username","role",
                          "is_active","bu_mashfrog","mashfrog_office","hire_date",
                          "created_at","updated_at"],
@@ -142,6 +153,12 @@ STORE: dict[str, Any] = {
 
 _write_lock = asyncio.Lock()
 _initialized = False
+_last_backup_time: Optional[datetime] = None
+_BACKUP_INTERVAL_SECONDS = 2 * 3600   # 2 ore
+
+# Write-Ahead: True se persist() ha fallito e lo STORE RAM è più recente di SharePoint.
+# Il loop di retry in main.py tenta di risincronizzare ogni 30s finché _dirty è True.
+_dirty: bool = False
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -281,26 +298,63 @@ async def _sp_download(filename: str) -> Optional[bytes]:
         return None
 
 
-async def _sp_upload(filename: str, content: bytes) -> Optional[str]:
-    """Carica un file su SharePoint. Ritorna il webUrl."""
+async def _sp_upload(filename: str, content: bytes, _retries: int = 4) -> Optional[str]:
+    """Carica un file su SharePoint. Ritorna il webUrl.
+    Ritenta fino a _retries volte in caso di 423 Locked (file aperto da un altro utente).
+    """
     if not settings.sharepoint_enabled:
         return None
+    token = await _get_token()
+    drive_id = await _get_drive_id()
+    url = (f"https://graph.microsoft.com/v1.0/drives/{drive_id}"
+           f"/root:/{settings.sharepoint_root_folder}/{filename}:/content")
+    last_error: Optional[Exception] = None
+    for attempt in range(1, _retries + 1):
+        try:
+            async with httpx.AsyncClient(timeout=60) as client:
+                resp = await client.put(
+                    url,
+                    headers={"Authorization": f"Bearer {token}", "Content-Type": MIME_EXCEL},
+                    content=content,
+                )
+                if resp.status_code == 423:
+                    wait = attempt * 3
+                    print(f"[SP] Upload '{filename}' — 423 Locked (tentativo {attempt}/{_retries}), riprovo in {wait}s...")
+                    await asyncio.sleep(wait)
+                    continue
+                resp.raise_for_status()
+                return resp.json().get("webUrl", "")
+        except Exception as e:
+            last_error = e
+            print(f"[SP] Upload '{filename}' errore (tentativo {attempt}/{_retries}): {e}")
+            if attempt < _retries:
+                await asyncio.sleep(attempt * 2)
+    print(f"[SP] Upload '{filename}' fallito dopo {_retries} tentativi: {last_error}")
+    return None
+
+
+async def _sp_delete(filename: str) -> bool:
+    """Elimina un file da SharePoint. Ritorna True se eliminato (o già assente)."""
+    if not settings.sharepoint_enabled:
+        return False
     try:
-        token = await _get_token()
+        token    = await _get_token()
         drive_id = await _get_drive_id()
-        url = (f"https://graph.microsoft.com/v1.0/drives/{drive_id}"
-               f"/root:/{settings.sharepoint_root_folder}/{filename}:/content")
-        async with httpx.AsyncClient(timeout=60) as client:
-            resp = await client.put(
-                url,
-                headers={"Authorization": f"Bearer {token}", "Content-Type": MIME_EXCEL},
-                content=content,
-            )
-            resp.raise_for_status()
-            return resp.json().get("webUrl", "")
+        # Prima ottieni l'item ID tramite il path
+        url_meta = (f"https://graph.microsoft.com/v1.0/drives/{drive_id}"
+                    f"/root:/{settings.sharepoint_root_folder}/{filename}")
+        async with httpx.AsyncClient(timeout=30) as client:
+            r = await client.get(url_meta, headers={"Authorization": f"Bearer {token}"})
+            if r.status_code == 404:
+                return True   # già non esiste
+            r.raise_for_status()
+            item_id = r.json()["id"]
+            url_del = f"https://graph.microsoft.com/v1.0/drives/{drive_id}/items/{item_id}"
+            rd = await client.delete(url_del, headers={"Authorization": f"Bearer {token}"})
+            return rd.status_code in (204, 404)
     except Exception as e:
-        print(f"[SP] Upload '{filename}' fallito: {e}")
-        return None
+        print(f"[SP] Delete '{filename}' fallito: {e}")
+        return False
 
 
 async def _sp_get_modified_date(filename: str) -> Optional[str]:
@@ -348,17 +402,32 @@ def _wb_to_store(wb: openpyxl.Workbook) -> None:
                            for i in range(len(headers))})
         return result
 
-    # Users
-    for r in read_sheet(SHEET_USERS):
-        email = r.get("email", "")
-        if email:
-            STORE["users"][email] = r
-
-    # CVProfiles
-    for r in read_sheet(SHEET_CVPROFILES):
-        email = r.get("email", "")
-        if email:
-            STORE["cv_profiles"][email] = r
+    # Staff (foglio unificato Users + CVProfiles) — con fallback ai fogli legacy
+    if SHEET_STAFF in wb.sheetnames:
+        for r in read_sheet(SHEET_STAFF):
+            email = r.get("email", "").lower().strip()
+            if not email:
+                continue
+            # Campi account utente
+            user_row = {f: r.get(f, "") for f in _STAFF_USER_FIELDS}
+            STORE["users"][email] = user_row
+            # Campi profilo CV (cv_updated_at → updated_at per compat interna)
+            cv_row  = {f: r.get(f, "") for f in ["title","summary","phone","linkedin_url",
+                        "birth_date","birth_place","residence_city",
+                        "first_employment_date","availability_status"]}
+            cv_row["email"]      = email
+            cv_row["updated_at"] = r.get("cv_updated_at", "")
+            STORE["cv_profiles"][email] = cv_row
+    else:
+        # Backward-compat: leggi i due fogli separati
+        for r in read_sheet(SHEET_USERS):
+            email = r.get("email", "").lower().strip()
+            if email:
+                STORE["users"][email] = r
+        for r in read_sheet(SHEET_CVPROFILES):
+            email = r.get("email", "").lower().strip()
+            if email:
+                STORE["cv_profiles"][email] = r
 
     # Liste per email
     for sheet, store_key in [
@@ -407,15 +476,16 @@ def _store_to_wb() -> openpyxl.Workbook:
             max_len = max((len(str(c.value or "")) for c in col), default=0)
             ws.column_dimensions[col[0].column_letter].width = min(max_len + 4, 60)
 
-    # Users
-    headers = HEADERS[SHEET_USERS]
-    rows = [[r.get(h, "") for h in headers] for r in STORE["users"].values()]
-    add_sheet(SHEET_USERS, headers, rows)
-
-    # CVProfiles
-    headers = HEADERS[SHEET_CVPROFILES]
-    rows = [[r.get(h, "") for h in headers] for r in STORE["cv_profiles"].values()]
-    add_sheet(SHEET_CVPROFILES, headers, rows)
+    # Staff — foglio unificato Users + CVProfiles
+    staff_headers = HEADERS[SHEET_STAFF]
+    staff_rows = []
+    for email, u in STORE["users"].items():
+        cv = STORE["cv_profiles"].get(email, {})
+        row = [u.get(f, "") for f in _STAFF_USER_FIELDS] + \
+              [cv.get(f, "") if f != "cv_updated_at" else cv.get("updated_at", "")
+               for f in _STAFF_CV_FIELDS]
+        staff_rows.append(row)
+    add_sheet(SHEET_STAFF, staff_headers, staff_rows)
 
     # Liste per email
     for sheet, store_key in [
@@ -479,34 +549,115 @@ async def init_store() -> None:
     _initialized = True
 
 
-async def persist() -> None:
-    """Serializza STORE → Excel → upload SharePoint (chiamato dopo ogni write)."""
+async def persist() -> bool:
+    """Serializza STORE → Excel → upload SharePoint (chiamato dopo ogni write).
+
+    Ritorna True se la sincronizzazione è riuscita (o SharePoint è disabilitato).
+    Ritorna False e setta _dirty=True se tutti i retry su SP falliscono.
+    Non solleva eccezioni: i dati restano comunque aggiornati in memoria.
+    """
+    global _dirty
     wb = _store_to_wb()
     content = _wb_to_bytes(wb)
-    await _sp_upload(settings.excel_filename, content)
+
+    if not settings.sharepoint_enabled:
+        _dirty = False
+        return True
+
+    url = await _sp_upload(settings.excel_filename, content)
+    if url is not None:
+        if _dirty:
+            print("[Store] WAL: dati precedentemente non salvati ora sincronizzati su SharePoint.")
+        _dirty = False
+        return True
+
+    # Upload fallito dopo tutti i retry (es. file locked > 30s)
+    _dirty = True
+    print("[Store] WAL: persist() fallita — STORE RAM aggiornato, SharePoint non sincronizzato. "
+          "Retry automatico ogni 30s.")
+    return False
 
 
-async def do_daily_backup() -> bool:
+async def retry_persist_if_dirty() -> bool:
+    """Ritenta persist() se _dirty=True. Acquisisce il write lock.
+
+    Chiamare solo dall'esterno del lock (es. dal loop di retry in main.py).
+    Ritorna True se non c'era nulla da fare o se il retry è riuscito.
     """
-    Verifica se il backup è aggiornato a oggi.
-    Se non lo è, copia master → backup (sovrascrive il precedente) e ritorna True.
+    if not _dirty:
+        return True
+    async with _write_lock:
+        if not _dirty:   # ricontrollo dopo aver acquisito il lock
+            return True
+        print("[Store] WAL retry: tentativo di sincronizzare dati non salvati su SharePoint...")
+        return await persist()
+
+
+async def do_periodic_backup() -> bool:
     """
+    Crea un backup ogni _BACKUP_INTERVAL_SECONDS (default 2 ore).
+    Copia master_cv.xlsx → master_cv_backup.xlsx su SharePoint.
+    """
+    global _last_backup_time
     if not settings.sharepoint_enabled:
         return False
 
-    backup_date = await _sp_get_modified_date(settings.excel_backup_filename)
-    today = _today_iso()
+    now = datetime.utcnow()
+    if _last_backup_time is not None:
+        elapsed = (now - _last_backup_time).total_seconds()
+        if elapsed < _BACKUP_INTERVAL_SECONDS:
+            return False
 
-    if backup_date == today:
-        return False  # backup già aggiornato oggi
-
-    print(f"[Backup] Backup obsoleto ({backup_date or 'non esiste'}) → creo backup di oggi...")
+    print(f"[Backup] Avvio backup periodico ({int(_BACKUP_INTERVAL_SECONDS/3600)}h)...")
     content = await _sp_download(settings.excel_filename)
     if content:
         await _sp_upload(settings.excel_backup_filename, content)
+        _last_backup_time = now
         print(f"[Backup] Backup aggiornato: {settings.excel_backup_filename}")
         return True
     return False
+
+
+# Alias per backward-compat con eventuali chiamate esterne
+do_daily_backup = do_periodic_backup
+
+
+async def _sp_list_folder(folder_path: str) -> list[dict]:
+    """
+    Elenca i file in una cartella SharePoint.
+    folder_path: percorso relativo sotto sharepoint_root_folder
+    Ritorna lista di dict con 'name', 'size', 'lastModifiedDateTime'.
+    """
+    if not settings.sharepoint_enabled:
+        return []
+    try:
+        token = await _get_token()
+        drive_id = await _get_drive_id()
+        url = (f"https://graph.microsoft.com/v1.0/drives/{drive_id}"
+               f"/root:/{settings.sharepoint_root_folder}/{folder_path}:/children")
+        async with httpx.AsyncClient(timeout=30) as client:
+            resp = await client.get(
+                url,
+                headers={"Authorization": f"Bearer {token}"},
+            )
+            if resp.status_code == 404:
+                return []
+            resp.raise_for_status()
+            items = resp.json().get("value", [])
+            return [
+                {"name": i["name"], "size": i.get("size", 0),
+                 "lastModifiedDateTime": i.get("lastModifiedDateTime", "")}
+                for i in items
+                if not i.get("folder")   # solo file, non sotto-cartelle
+            ]
+    except Exception as e:
+        print(f"[SP] Listing '{folder_path}' fallito: {e}")
+        return []
+
+
+async def sp_download_file(folder_path: str, filename: str) -> Optional[bytes]:
+    """Scarica un singolo file da una sotto-cartella SharePoint."""
+    return await _sp_download(f"{folder_path}/{filename}")
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -653,13 +804,13 @@ def get_educations(email: str) -> list[dict]:
 async def add_education(email: str, data: dict) -> dict:
     async with _write_lock:
         row = {"id": new_id(), "email": email,
-               "institution": data.get("institution",""),
-               "degree_level": data.get("degree_level",""),
-               "field_of_study": data.get("field_of_study",""),
-               "graduation_year": str(data.get("graduation_year","")),
-               "graduation_date": str(data.get("graduation_date","")),
-               "grade": data.get("grade",""),
-               "notes": data.get("notes","")}
+               "institution":    data.get("institution","") or "",
+               "degree_level":   data.get("degree_level","") or "",
+               "field_of_study": data.get("field_of_study","") or "",
+               "graduation_year":str(data.get("graduation_year","") or ""),
+               "graduation_date":str(data.get("graduation_date","") or ""),
+               "grade":          data.get("grade","") or "",
+               "notes":          data.get("notes","") or ""}
         STORE["educations"].setdefault(email, []).append(row)
         await persist()
         return row
@@ -701,15 +852,15 @@ def get_experiences(email: str) -> list[dict]:
 async def add_experience(email: str, data: dict) -> dict:
     async with _write_lock:
         row = {"id": new_id(), "email": email,
-               "company_name": data.get("company_name",""),
-               "client_name": data.get("client_name",""),
-               "role": data.get("role",""),
-               "start_date": str(data.get("start_date","")),
-               "end_date": str(data.get("end_date","")),
-               "is_current": _fmt(data.get("is_current", False)),
-               "project_description": data.get("project_description",""),
-               "activities": data.get("activities",""),
-               "sort_order": str(data.get("sort_order","0"))}
+               "company_name":       data.get("company_name","") or "",
+               "client_name":        data.get("client_name","") or "",
+               "role":               data.get("role","") or "",
+               "start_date":         str(data.get("start_date","") or ""),
+               "end_date":           str(data.get("end_date","") or ""),
+               "is_current":         _fmt(data.get("is_current", False)),
+               "project_description":data.get("project_description","") or "",
+               "activities":         data.get("activities","") or "",
+               "sort_order":         str(data.get("sort_order","0") or "0")}
         STORE["experiences"].setdefault(email, []).append(row)
         await persist()
         return row
@@ -747,12 +898,12 @@ async def add_certification(email: str, data: dict) -> dict:
     async with _write_lock:
         tags = data.get("tags", [])
         row = {"id": new_id(), "email": email,
-               "name": data.get("name",""),
-               "issuing_org": data.get("issuing_org",""),
-               "cert_code": data.get("cert_code",""),
-               "version": data.get("version",""),
-               "year": str(data.get("year","")),
-               "expiry_date": str(data.get("expiry_date","")),
+               "name":        data.get("name","") or "",
+               "issuing_org": data.get("issuing_org","") or "",
+               "cert_code":   data.get("cert_code","") or "",
+               "version":     data.get("version","") or "",
+               "year":        str(data.get("year","") or ""),
+               "expiry_date": str(data.get("expiry_date","") or ""),
                "has_formal_cert": _fmt(data.get("has_formal_cert", True)),
                "doc_attachment_type": data.get("doc_attachment_type","NONE"),
                "doc_url": data.get("doc_url",""),
@@ -864,11 +1015,20 @@ async def update_document(email: str, doc_id: str, data: dict) -> dict:
         return row
 
 
-async def delete_document(email: str, doc_id: str) -> None:
+async def delete_document(email: str, doc_id: str) -> bool:
+    sp_path = None
     async with _write_lock:
         items = STORE["documents"].get(email, [])
+        doc = next((r for r in items if r["id"] == doc_id), None)
+        if doc is None:
+            return False
+        sp_path = doc.get("sharepoint_path", "")
         STORE["documents"][email] = [r for r in items if r["id"] != doc_id]
         await persist()
+    # Cancella da SP fuori dal lock (non bloccante)
+    if sp_path:
+        await _sp_delete(sp_path)
+    return True
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -911,7 +1071,7 @@ def compute_completeness(email: str) -> float:
         len(STORE["certifications"].get(email, [])) > 0,
         len(STORE["languages"].get(email, [])) > 0,
     ]
-    return round(sum(checks) / len(checks) * 100, 1)
+    return round(sum(checks) / len(checks), 3)   # 0.0 – 1.0
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -950,7 +1110,7 @@ def suggest_cert_codes(query: str, email: str, limit: int = 10) -> list[dict]:
             jaccard = len(q_tokens & c_tokens) / len(q_tokens | c_tokens)
             seq = SequenceMatcher(None, query.lower(), name.lower()).ratio()
             score = max(jaccard, seq)
-            if score >= 0.3 and code not in candidates:
+            if score >= 0.55 and code not in candidates:
                 candidates[code] = {"cert_code": code, "name": name,
                                     "issuing_org": c.get("issuing_org",""), "score": score}
 

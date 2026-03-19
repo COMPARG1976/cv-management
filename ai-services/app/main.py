@@ -29,11 +29,11 @@ app = FastAPI(
 
 class ParseRequest(BaseModel):
     file_path: str          # percorso assoluto del file sul volume condiviso
-    document_id: int        # ID del CVDocument nel DB (per correlazione)
+    document_id: str = ""   # ID del CVDocument (stringa UUID o vuoto)
 
 
 class ParseResponse(BaseModel):
-    document_id: int
+    document_id: str = ""
     status: str             # "ok" | "error"
     data: dict | None = None
     error: str | None = None

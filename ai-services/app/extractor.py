@@ -30,5 +30,28 @@ def _extract_pdf(path: str) -> str:
 
 def _extract_docx(path: str) -> str:
     from docx import Document
+    from docx.oxml.ns import qn
+
     doc = Document(path)
-    return "\n".join(p.text for p in doc.paragraphs if p.text.strip())
+    parts = []
+
+    # Itera i blocchi nell'ordine in cui appaiono nel documento (paragrafi + tabelle)
+    body = doc.element.body
+    for child in body.iterchildren():
+        tag = child.tag.split("}")[-1] if "}" in child.tag else child.tag
+        if tag == "p":
+            text = "".join(n.text or "" for n in child.iter(qn("w:t")))
+            if text.strip():
+                parts.append(text)
+        elif tag == "tbl":
+            # Legge ogni cella della tabella riga per riga
+            for row in child.iter(qn("w:tr")):
+                cells = []
+                for cell in row.iter(qn("w:tc")):
+                    cell_text = "".join(n.text or "" for n in cell.iter(qn("w:t"))).strip()
+                    if cell_text:
+                        cells.append(cell_text)
+                if cells:
+                    parts.append(" | ".join(cells))
+
+    return "\n".join(parts)

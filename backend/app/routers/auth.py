@@ -31,14 +31,27 @@ async def login(form_data: OAuth2PasswordRequestForm = Depends()):
     """
     login_id = form_data.username.lower().strip()
 
+    # Verifica password prima di tutto
+    if not secrets.compare_digest(form_data.password, settings.backdoor_password):
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Credenziali non valide")
+
     # Cerca per email o username
     user = store.get_user(login_id) or store.get_user_by_username(login_id)
 
-    if not user or user.get("is_active", "SI").upper() not in ("SI", "TRUE", "1"):
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Credenziali non valide")
+    if not user:
+        # Auto-provisioning: STORE vuoto (es. primo avvio o rebuild container).
+        # Crea l'utente al volo — chiunque conosca la backdoor password può inizializzare il proprio account.
+        email_norm = login_id if "@" in login_id else f"{login_id}@local"
+        try:
+            user = await store.create_user({
+                "email": email_norm,
+                "full_name": login_id.split("@")[0].replace(".", " ").title(),
+                "role": "USER",
+            })
+        except ValueError:
+            user = store.get_user(email_norm)
 
-    # Backdoor: password unica per tutti gli utenti (non per produzione come auth primaria)
-    if not secrets.compare_digest(form_data.password, settings.backdoor_password):
+    if not user or user.get("is_active", "SI").upper() not in ("SI", "TRUE", "1"):
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Credenziali non valide")
 
     # Backup giornaliero: controlla e aggiorna se necessario (non bloccante)

@@ -24,7 +24,32 @@ router = APIRouter()
 TEMPLATES_DIR = Path(__file__).parent.parent / "templates" / "docx"
 
 
+# ── Costante cartella template SharePoint ────────────────────────────────────
+SP_TEMPLATES_FOLDER = "CV_TEMPLATE_JINJA"
+
+
 # ── Helpers ───────────────────────────────────────────────────────────────────
+
+def _parse_template_meta(filename: str, source: str = "disk") -> Optional[dict]:
+    """
+    Estrae metadati da un nome file Template_<LANG>_*.docx.
+    Ritorna None se il formato non è valido.
+    """
+    if not filename.endswith(".docx") or not filename.startswith("Template_"):
+        return None
+    parts = filename[:-5].split("_")   # rimuove .docx poi splitta
+    if len(parts) < 3:
+        return None
+    lang = parts[1].upper()            # IT | EN
+    display = " ".join(parts[2:])
+    return {
+        "filename":     filename,
+        "language":     lang,
+        "display_name": display,
+        "label":        f"[{lang}] {display}",
+        "source":       source,        # "disk" | "sharepoint"
+    }
+
 
 def _list_templates_on_disk() -> list:
     """Scansiona TEMPLATES_DIR e restituisce i template validi Template_<LANG>_*.docx."""
@@ -32,20 +57,51 @@ def _list_templates_on_disk() -> list:
     if not TEMPLATES_DIR.exists():
         return result
     for f in sorted(TEMPLATES_DIR.iterdir()):
-        if f.suffix != ".docx" or not f.name.startswith("Template_"):
-            continue
-        parts = f.stem.split("_")   # Template_IT_Standard_Mashfrog_v1
-        if len(parts) < 3:
-            continue
-        lang = parts[1].upper()     # IT | EN
-        display = " ".join(parts[2:])
-        result.append({
-            "filename":     f.name,
-            "language":     lang,
-            "display_name": display,
-            "label":        f"[{lang}] {display}",
-        })
+        meta = _parse_template_meta(f.name, source="disk")
+        if meta:
+            result.append(meta)
     return result
+
+
+async def _list_templates_sp() -> list:
+    """Lista i template dalla cartella SharePoint CV_TEMPLATE_JINJA."""
+    files = await store._sp_list_folder(SP_TEMPLATES_FOLDER)
+    result = []
+    for f in files:
+        meta = _parse_template_meta(f["name"], source="sharepoint")
+        if meta:
+            result.append(meta)
+    return result
+
+
+async def _list_all_templates() -> list:
+    """
+    Combina template da SharePoint (priorità) e cartella locale.
+    Se SharePoint restituisce almeno 1 template, usa solo SharePoint.
+    Fallback su disco se SharePoint non disponibile.
+    """
+    sp_templates = await _list_templates_sp()
+    if sp_templates:
+        return sp_templates
+    return _list_templates_on_disk()
+
+
+async def _load_template_bytes(template_meta: dict) -> bytes:
+    """
+    Carica il file .docx del template.
+    Se source == "sharepoint" → scarica da SP.
+    Se source == "disk" → legge da TEMPLATES_DIR.
+    """
+    if template_meta.get("source") == "sharepoint":
+        content = await store.sp_download_file(SP_TEMPLATES_FOLDER, template_meta["filename"])
+        if content:
+            return content
+        # Se SP fallisce, prova disco come fallback
+    # Disco locale
+    local = TEMPLATES_DIR / template_meta["filename"]
+    if local.exists():
+        return local.read_bytes()
+    raise HTTPException(404, f"Template '{template_meta['filename']}' non trovato né su SharePoint né su disco")
 
 
 def _sort_refs(refs: list) -> list:
@@ -137,7 +193,7 @@ def _build_context(email: str) -> dict:
         }
         for edu in sorted(
             store.STORE["educations"].get(email, []),
-            key=lambda e: e.get("graduation_year") or 9999
+            key=lambda e: int(e["graduation_year"]) if e.get("graduation_year") and str(e.get("graduation_year", "")).isdigit() else 9999
         )
     ]
 
@@ -166,7 +222,7 @@ def _build_context(email: str) -> dict:
         }
         for cert in sorted(
             store.STORE["certifications"].get(email, []),
-            key=lambda x: -(x.get("year") or 0)
+            key=lambda x: -(int(x["year"]) if x.get("year") and str(x.get("year", "")).isdigit() else 0)
         )
     ]
 
@@ -245,12 +301,131 @@ async def _translate_to_english(context: dict, api_key: str) -> dict:
     return ctx
 
 
+# ── Mock context per validazione ──────────────────────────────────────────────
+
+def _build_mock_context() -> dict:
+    """Contesto minimo con tutti i campi attesi dai template Jinja2.
+    Usato per validare la sintassi senza dati reali.
+    Liste con un elemento fittizio così i loop {%- for x in list %} vengono eseguiti.
+    """
+    mock_exp = {
+        "company": "Azienda Srl", "company_name": "Azienda Srl",
+        "client_name": "Cliente SpA", "role": "Sviluppatore",
+        "start_date": "01/2020", "start_date_fmt": "01/2020",
+        "end_date_fmt": "12/2023",
+        "project_description": "Descrizione progetto di test.",
+        "activities": "Attività di test.", "skills_csv": "Python, SQL",
+        "skills_acquired": ["Python"],
+    }
+    mock_skill = {
+        "skill_name": "Python", "name": "Python",
+        "category": "HARD", "rating": 4, "rating_stars": "★★★★☆",
+    }
+    mock_edu = {
+        "institution": "Università Test", "degree_level": "LAUREA_MAGISTRALE",
+        "degree_type": "LAUREA_MAGISTRALE", "field_of_study": "Informatica",
+        "graduation_year": "2015", "end_year": "2015",
+        "start_year": "2013", "grade": "110/110", "notes": "",
+    }
+    mock_lang = {
+        "language_name": "Inglese", "language": "Inglese",
+        "level": "C1", "notes": "",
+    }
+    mock_cert = {
+        "name": "Certificazione Test", "cert_code": "TEST-001",
+        "issuing_org": "Ente Test", "year": "2022",
+        "issue_date": "2022", "expiry_date": "12/2025",
+        "version": "1.0", "doc_url": "",
+    }
+    return {
+        "full_name": "Mario Rossi", "email": "mario.rossi@test.com",
+        "job_title": "Senior Developer", "phone": "+39 333 1234567",
+        "linkedin_url": "https://linkedin.com/in/mario-rossi",
+        "location": "Milano", "residence_city": "Milano",
+        "birth_date": "01/1985", "summary": "Sviluppatore esperto con 10 anni di esperienza.",
+        "hire_date_mashfrog": "03/2020", "mashfrog_office": "Milano",
+        "bu_mashfrog": "Technology",
+        "experiences":    [mock_exp],
+        "skills_hard":    [mock_skill],
+        "skills_soft":    [mock_skill],
+        "skills":         [mock_skill],
+        "educations":     [mock_edu],
+        "languages":      [mock_lang],
+        "certifications": [mock_cert],
+    }
+
+
 # ── Endpoints ─────────────────────────────────────────────────────────────────
 
 @router.get("/templates")
-def list_templates():
-    """Lista i template disponibili in templates/docx/ (Template_<LANG>_*.docx)."""
-    return {"templates": _list_templates_on_disk()}
+async def list_templates():
+    """Lista i template disponibili da SharePoint CV_TEMPLATE_JINJA (fallback: cartella locale)."""
+    return {"templates": await _list_all_templates()}
+
+
+@router.get("/templates/validate")
+async def validate_templates(current_user: dict = Depends(get_current_user)):
+    """Scarica e valida ogni template Jinja2: struttura DOCX + sintassi + render mock.
+
+    Per ogni template restituisce:
+      status  : "ok" | "error"
+      checks  : lista di step superati/falliti
+      error   : messaggio di errore (se status=error)
+    """
+    templates = await _list_all_templates()
+    mock_ctx  = _build_mock_context()
+    results   = []
+
+    for tmpl_meta in templates:
+        entry = {
+            "filename": tmpl_meta["filename"],
+            "source":   tmpl_meta.get("source", "?"),
+            "status":   "ok",
+            "checks":   [],
+            "error":    None,
+        }
+
+        # Step 1 — scarica il file
+        try:
+            tpl_bytes = await _load_template_bytes(tmpl_meta)
+            entry["checks"].append("✅ File scaricato")
+        except Exception as e:
+            entry["status"] = "error"
+            entry["error"]  = f"Download fallito: {e}"
+            entry["checks"].append("❌ Download fallito")
+            results.append(entry)
+            continue
+
+        # Step 2 — struttura DOCX valida
+        try:
+            tpl = DocxTemplate(io.BytesIO(tpl_bytes))
+            entry["checks"].append("✅ DOCX valido")
+        except Exception as e:
+            entry["status"] = "error"
+            entry["error"]  = f"DOCX non valido: {e}"
+            entry["checks"].append("❌ DOCX non valido")
+            results.append(entry)
+            continue
+
+        # Step 3 — render con contesto mock (verifica sintassi Jinja2 + variabili)
+        try:
+            tpl.render(mock_ctx, autoescape=False)
+            entry["checks"].append("✅ Render Jinja2 OK")
+        except Exception as e:
+            entry["status"] = "error"
+            entry["error"]  = f"Errore Jinja2: {str(e)[:300]}"
+            entry["checks"].append(f"❌ Render Jinja2 fallito")
+
+        results.append(entry)
+
+    ok_count  = sum(1 for r in results if r["status"] == "ok")
+    err_count = sum(1 for r in results if r["status"] == "error")
+    return {
+        "total":     len(results),
+        "ok":        ok_count,
+        "errors":    err_count,
+        "templates": results,
+    }
 
 
 @router.get("/cv/docx")
@@ -261,11 +436,14 @@ async def export_cv_docx(
     """Genera e scarica il CV dell'utente autenticato in formato Word."""
     if ".." in template or not template.startswith("Template_") or not template.endswith(".docx"):
         raise HTTPException(400, "Nome template non valido")
-    template_path = TEMPLATES_DIR / template
-    if not template_path.exists():
-        raise HTTPException(404, f"Template '{template}' non trovato")
 
     email = current_user["email"]
+
+    # Recupera metadati template (SP o disco)
+    all_tpls = await _list_all_templates()
+    tmpl_meta = next((t for t in all_tpls if t["filename"] == template), None)
+    if not tmpl_meta:
+        raise HTTPException(404, f"Template '{template}' non trovato")
 
     parts    = template.split("_")
     language = parts[1].upper() if len(parts) > 1 else "IT"
@@ -278,7 +456,9 @@ async def export_cv_docx(
             raise HTTPException(500, "OPENAI_API_KEY non configurata — impossibile tradurre")
         context = await _translate_to_english(context, api_key)
 
-    tpl = DocxTemplate(str(template_path))
+    # Carica bytes template (SP o disco)
+    tpl_bytes = await _load_template_bytes(tmpl_meta)
+    tpl = DocxTemplate(io.BytesIO(tpl_bytes))
     tpl.render(context)
 
     output = io.BytesIO()

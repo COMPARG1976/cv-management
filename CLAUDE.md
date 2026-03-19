@@ -19,9 +19,8 @@
 |------------|------------|---------|
 | Backend | FastAPI | 0.116+ |
 | Python | cpython | 3.12 |
-| ORM | SQLAlchemy | 2.0 |
-| DB driver | psycopg2-binary | 2.9 |
-| Database | PostgreSQL | 15-alpine |
+| Storage | openpyxl (Excel su SharePoint) | 3.1+ |
+| Auth | Microsoft Entra ID (MSAL) + backdoor locale | — |
 | Frontend | React | 18.x |
 | Build tool | Vite | 5.x |
 | AI | OpenAI API | gpt-4o |
@@ -225,15 +224,41 @@ AUTH_PROVIDER=fake
 - Rimossi: `scripts/update_opentext_certs.py`, `backend/app/cert_catalog.json`
 - `populate_cert_catalog()` rimossa da `main.py`
 
-### Sprint 6 — TODO (pianificato)
-- **SSO Microsoft Entra ID**: login con account aziendale Microsoft (MSAL + token Entra)
-- **Role Management**: ADMIN può promuovere/degradare altri utenti (PUT /users/{id}/role)
-- **People Analytics** (nuovo tile Admin):
-  - Ricerca multi-criterio (skill, cert, lingua, BU, disponibilità)
-  - Tabella risultati con selezione multipla
-  - Export Excel, Export PDF batch (zip), Export JSON strutturato
-  - Dashboard: top skill, completezza CV, distribuzione disponibilità
-- **Integrazione allegati SharePoint**: campo `sharepoint_url` su Certification e Reference
+### Sprint 6 — Production Readiness + Excel Backend ✅ (2026-03-18)
+- **Backend Excel-only**: rimosso PostgreSQL, `master_cv.xlsx` su SharePoint è unico storage
+- **SSO Microsoft Entra ID**: login con account aziendale, backdoor locale per admin
+- **Sheet Staff**: merge `Users` + `CVProfiles` in un unico sheet (backward-compat fallback)
+- **Fix completeness score**: backend ritorna 0–1 (era 0–100), frontend già moltiplicava × 100
+- **Fix Stars**: `Number(value)` nel componente (valori Excel arrivano come stringa)
+- **Fix delete_document**: ritorna `True`/`False` invece di `None` (evita 404 spurio)
+- **Upload CV**: parametro `ai_update` per scegliere se attivare AI parsing; file salvato su SP `CV/{email}/`
+- **Download CV**: `GET /upload/documents/{id}/download` — tenta SP poi volume locale
+- **Template DOCX da SharePoint**: `GET /export/templates` legge da SP `CV_TEMPLATE_JINJA` (fallback locale)
+- **Backup ogni 2 ore**: `asyncio.create_task(_backup_loop())` in lifespan, tracciamento timestamp in-memory
+- **Retry upload SP 423**: 4 tentativi con backoff 3s/6s/9s/12s su file locked
+- **Cert hint threshold**: alzato da 0.3 a 0.55 (Jaccard + SequenceMatcher)
+
+### Sprint 7 — WAL + Template Validation + Cert Import Analysis ✅ (2026-03-19)
+- **WAL (Write-Ahead Log)**: `_dirty` flag in `excel_store.py`; `persist()` ritorna `bool`; `retry_persist_if_dirty()` acquista write lock e riprova; loop background ogni 30s in `main.py`; `/health` espone `sharepoint_dirty`
+- **Fix `str(None)` → `"None"`**: bug storage in `add_experience`, `add_education`, `add_certification` — pattern `str(data.get("field","") or "")`
+- **Template DOCX validation**: `GET /export/templates/validate` — scarica template SP, valida struttura DOCX, render con mock context Jinja2; tile "Aggiorna template" visibile solo a `giuseppe.comparetti`
+- **Naming CV/CERT**: convenzione `nome.cognome_CV_<first15>.<ext>` e `nome.cognome_CER_<code>_<first15>.<ext>`; struttura flat `CV/` e `CER/` (non per-persona)
+- **Script `_import_certs_analysis.py`**: analisi SAP_CERTIFICAZIONI_2026.xlsx + 133 PDF in CERTIFICAZIONI_EX_CARTELLA_MADERA; output `CERT_ANALYSIS_20260319.xlsx` (7 sheet); AI verify con gpt-4o/gpt-4o-mini (122 PDF: 90 OK, 32 mismatch); costo ~$0.15
+- **Script `_update_cert_analysis.py`**: aggiorna CERT_ANALYSIS senza rieseguire AI; applica correzioni da PERSONE_SENZA_EMAIL (nuova mail, inverti nome/cognome); colori VERDE/ROSSO/GRIGIO/AZZURRO; genera righe azzurre corrette per ogni rossa
+- **TODO futuro**: ZIP export (script legge colonna "export" da master_cv_copy, crea due zip CV+CERT)
+- **TODO futuro**: fase 2 `_import_certs_analysis.py --generate-store` (dopo revisione umana CERT_ANALYSIS)
+
+---
+
+## REGOLA CRITICA — master_cv.xlsx
+
+> **⛔ VIETATO manipolare `master_cv.xlsx` direttamente** (lettura/scrittura via openpyxl, script one-shot, ecc.)
+> senza esplicito assenso di giuseppe.comparetti.
+>
+> Il file è l'unico storage di produzione. Modifiche dirette bypassano lock, WAL, backup e audit trail.
+> **Qualsiasi scrittura deve passare ESCLUSIVAMENTE dalle API dell'applicazione** (`excel_store.py` tramite i router FastAPI).
+> Unica eccezione: script di import una-tantum approvati esplicitamente (es. `_import_certs_analysis.py`
+> fase 2 — da eseguire solo dopo revisione umana del file CERT_ANALYSIS).
 
 ---
 

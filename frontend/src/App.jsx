@@ -17,7 +17,7 @@ import {
   getSkillSuggestions, getCertSuggestions,
   uploadCV, applyDiff, getCVHints,
   getDocuments, downloadDocument, deleteDocument,
-  listExportTemplates, exportCVDocx,
+  listExportTemplates, validateExportTemplates, exportCVDocx,
 } from "./api.js";
 
 // ── Costanti ──────────────────────────────────────────────────────────────────
@@ -51,7 +51,7 @@ function Stars({ value, onChange, max = 5 }) {
       {Array.from({ length: max }, (_, i) => i + 1).map(n => (
         <span
           key={n}
-          style={{ cursor: onChange ? "pointer" : "default", fontSize: 16, color: n <= (value || 0) ? "#f59e0b" : "#d1d5db" }}
+          style={{ cursor: onChange ? "pointer" : "default", fontSize: 16, color: n <= (Number(value) || 0) ? "#f59e0b" : "#d1d5db" }}
           onClick={() => onChange && onChange(n)}
         >★</span>
       ))}
@@ -240,7 +240,7 @@ export default function App() {
       </header>
 
       <main className="main-content">
-        {view === VIEWS.HOME         && <HomeView currentUser={currentUser} setView={setView} />}
+        {view === VIEWS.HOME         && <HomeView currentUser={currentUser} setView={setView} token={token} />}
         {view === VIEWS.MY_CV        && <MyCVView token={token} currentUser={currentUser} onBack={() => setView(VIEWS.HOME)} />}
         {view === VIEWS.ADMIN_USERS  && <PlaceholderView title="Gestione Utenti"       onBack={() => setView(VIEWS.HOME)} sprint="Sprint 4" />}
         {view === VIEWS.ADMIN_SEARCH && <PlaceholderView title="Ricerca per Skill"     onBack={() => setView(VIEWS.HOME)} sprint="Sprint 4" />}
@@ -364,10 +364,28 @@ function LoginPage({ onLogin, entraError }) {
 }
 
 // ── Home View ─────────────────────────────────────────────────────────────────
-function HomeView({ currentUser, setView }) {
+function HomeView({ currentUser, setView, token }) {
   const isAdmin = currentUser?.role === "ADMIN";
+  const [tplMsg, setTplMsg] = useState(null);   // null | {ok, text}
+  const [tplBusy, setTplBusy] = useState(false);
 
-  const tiles = isAdmin ? [
+  // Tile "Aggiorna template": visibile solo per giuseppe.comparetti
+  const isTemplateAdmin = (currentUser?.email || "").startsWith("giuseppe.comparetti");
+
+  async function handleRefreshTemplates() {
+    setTplBusy(true);
+    setTplMsg(null);
+    try {
+      const data = await validateExportTemplates(token);
+      setTplMsg({ ok: data.errors === 0, data });
+    } catch (e) {
+      setTplMsg({ ok: false, data: null, text: `Errore chiamata: ${e.message}` });
+    } finally {
+      setTplBusy(false);
+    }
+  }
+
+  const navTiles = isAdmin ? [
     { icon: "👥", label: "Utenti",        view: VIEWS.ADMIN_USERS },
     { icon: "🔍", label: "Ricerca Skill", view: VIEWS.ADMIN_SEARCH },
     { icon: "📊", label: "Analytics",     view: VIEWS.ADMIN_STATS },
@@ -382,13 +400,60 @@ function HomeView({ currentUser, setView }) {
         Benvenuto{currentUser?.full_name ? `, ${currentUser.full_name}` : ""}
       </h2>
       <div className="tiles">
-        {tiles.map(t => (
+        {navTiles.map(t => (
           <div key={t.view} className="tile" onClick={() => setView(t.view)}>
             <span className="tile__icon">{t.icon}</span>
             <span className="tile__label">{t.label}</span>
           </div>
         ))}
+
+        {isTemplateAdmin && (
+          <div
+            className={`tile${tplBusy ? " tile--busy" : ""}`}
+            onClick={!tplBusy ? handleRefreshTemplates : undefined}
+            style={{ opacity: tplBusy ? 0.6 : 1, cursor: tplBusy ? "wait" : "pointer" }}
+          >
+            <span className="tile__icon">{tplBusy ? "⏳" : "🔄"}</span>
+            <span className="tile__label">{tplBusy ? "Verifica..." : "Aggiorna template"}</span>
+          </div>
+        )}
       </div>
+
+      {tplMsg && (
+        <div style={{ marginTop: 16, fontSize: 13 }}>
+          {/* Riepilogo */}
+          <div style={{
+            padding: "8px 14px", borderRadius: 6, marginBottom: 8,
+            background: tplMsg.ok ? "#e8f5e9" : "#fdecea",
+            color:      tplMsg.ok ? "#2e7d32" : "#c62828",
+            border:     `1px solid ${tplMsg.ok ? "#a5d6a7" : "#ef9a9a"}`,
+            fontWeight: 600,
+          }}>
+            {tplMsg.data
+              ? `${tplMsg.data.total} template — ${tplMsg.data.ok} ✅ OK, ${tplMsg.data.errors} ❌ con errori`
+              : tplMsg.text}
+          </div>
+          {/* Dettaglio per template */}
+          {tplMsg.data?.templates?.map(t => (
+            <div key={t.filename} style={{
+              padding: "6px 12px", marginBottom: 4, borderRadius: 4,
+              background: t.status === "ok" ? "#f1f8e9" : "#fff3e0",
+              border: `1px solid ${t.status === "ok" ? "#c5e1a5" : "#ffcc80"}`,
+            }}>
+              <div style={{ fontWeight: 600, marginBottom: 2 }}>
+                {t.status === "ok" ? "✅" : "❌"} {t.filename}
+                <span style={{ fontWeight: 400, color: "#777", marginLeft: 8 }}>({t.source})</span>
+              </div>
+              <div style={{ color: "#555" }}>{t.checks.join("  ·  ")}</div>
+              {t.error && (
+                <div style={{ color: "#c62828", marginTop: 2, fontFamily: "monospace", fontSize: 11 }}>
+                  {t.error}
+                </div>
+              )}
+            </div>
+          ))}
+        </div>
+      )}
     </>
   );
 }
@@ -2530,8 +2595,7 @@ function ExportTab({ token }) {
         fontSize: 12, color: "var(--color-text-muted)",
         border: "1px solid var(--color-border)",
       }}>
-        {/* TODO Admin: aggiungere upload template dalla sezione Admin */}
-        I template disponibili sono quelli caricati dall'amministratore nella directory templates.
+        I template disponibili sono quelli caricati dall'amministratore nella cartella SharePoint <strong>CV_TEMPLATE_JINJA</strong>.
       </div>
     </div>
   );
@@ -2777,10 +2841,7 @@ function UploadTab({ token, cv, setCV }) {
                     {doc.original_filename}
                   </div>
                   <div style={{fontSize:12,color:"var(--color-text-muted)",marginBottom:4}}>
-                    {new Date(doc.uploaded_at).toLocaleDateString("it-IT",{
-                      day:"2-digit",month:"2-digit",year:"numeric",
-                      hour:"2-digit",minute:"2-digit",
-                    })}
+                    <DateStr value={doc.upload_date} withTime={true} />
                     {doc.file_size_bytes && ` · ${(doc.file_size_bytes/1024).toFixed(0)} KB`}
                     {doc.ai_updated && (
                       <span style={{

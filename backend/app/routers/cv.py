@@ -46,7 +46,11 @@ def _parse_int(v) -> Optional[int]:
 def _parse_date_str(v) -> Optional[str]:
     if not v or str(v).strip() in ("", "None"):
         return None
-    return str(v).strip()
+    s = str(v).strip()
+    # Anno-solo (es. "2026" da Excel) → "2026-01-01" per soddisfare Pydantic date
+    if re.match(r'^\d{4}$', s):
+        return f"{s}-01-01"
+    return s
 
 
 def _row_to_skill(r: dict) -> CVSkillResponse:

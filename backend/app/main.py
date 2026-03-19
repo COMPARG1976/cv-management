@@ -2,6 +2,8 @@
 CV Management System — Backend FastAPI (Excel backend)
 Entry point: lifespan, middleware, router registration, health endpoint.
 """
+import asyncio
+import contextlib
 import logging
 from contextlib import asynccontextmanager
 
@@ -14,18 +16,53 @@ from app.excel_store import settings
 logger = logging.getLogger(__name__)
 
 
+_WAL_RETRY_INTERVAL = 30   # secondi tra un retry WAL e il successivo
+
+
+async def _backup_loop() -> None:
+    """Loop periodico che esegue il backup ogni 2 ore."""
+    while True:
+        await asyncio.sleep(store._BACKUP_INTERVAL_SECONDS)
+        try:
+            done = await store.do_periodic_backup()
+            if done:
+                logger.info("Backup periodico completato")
+        except Exception as e:
+            logger.error(f"Backup periodico errore: {e}")
+
+
+async def _wal_retry_loop() -> None:
+    """Loop WAL: ogni 30s ritenta persist() se ci sono dati non salvati su SharePoint."""
+    while True:
+        await asyncio.sleep(_WAL_RETRY_INTERVAL)
+        try:
+            ok = await store.retry_persist_if_dirty()
+            if ok and not store._dirty:
+                pass   # tutto sincronizzato, nessun log (evita rumore nei log)
+        except Exception as e:
+            logger.error(f"WAL retry errore: {e}")
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # Startup — carica dati da SharePoint (o file locale)
+    # Startup — carica dati da SharePoint
     try:
         await store.init_store()
         logger.info("STORE inizializzato correttamente")
     except Exception as e:
         logger.error(f"Errore inizializzazione STORE: {e}")
-        # Avvia comunque — lo STORE sarà vuoto, gli endpoint gestiscono casi empty
+
+    # Avvia task di background
+    backup_task  = asyncio.create_task(_backup_loop())
+    wal_task     = asyncio.create_task(_wal_retry_loop())
 
     yield
-    # Shutdown — nessuna azione necessaria (tutti i write sono già persistiti)
+
+    # Shutdown — ferma entrambi i task
+    for task in (backup_task, wal_task):
+        task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await task
 
 
 app = FastAPI(
@@ -71,4 +108,8 @@ app.include_router(export.router, prefix="/export", tags=["export"])
 # ── Health ────────────────────────────────────────────────────────────────────
 @app.get("/health", tags=["system"])
 def health():
-    return {"status": "ok", "service": "cv-management-backend"}
+    return {
+        "status": "ok",
+        "service": "cv-management-backend",
+        "sharepoint_dirty": store._dirty,   # True = dati RAM non ancora su SP
+    }
