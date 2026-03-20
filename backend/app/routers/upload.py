@@ -8,19 +8,42 @@ import json
 import os
 import time
 import uuid
+from collections import OrderedDict
 from datetime import datetime, date
 from difflib import SequenceMatcher
 from typing import Optional, Any
 
 import httpx
-from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Form
-from fastapi.responses import StreamingResponse
+from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Form, Query, Request
+from fastapi.responses import StreamingResponse, Response
 
 import app.excel_store as store
 from app.excel_store import settings
 from app.deps import get_current_user
 
 router = APIRouter()
+
+# ── Thumbnail LRU cache (max 50 entries × ~50 KB PNG ≈ 2.5 MB RAM) ───────────
+
+_THUMB_CACHE_MAX = 50
+_thumb_cache: OrderedDict[str, bytes] = OrderedDict()
+
+
+def _thumb_get(key: str) -> Optional[bytes]:
+    if key not in _thumb_cache:
+        return None
+    _thumb_cache.move_to_end(key)
+    return _thumb_cache[key]
+
+
+def _thumb_set(key: str, val: bytes) -> None:
+    if key in _thumb_cache:
+        _thumb_cache.move_to_end(key)
+    else:
+        if len(_thumb_cache) >= _THUMB_CACHE_MAX:
+            _thumb_cache.popitem(last=False)
+        _thumb_cache[key] = val
+
 
 ALLOWED_EXTENSIONS = {".pdf", ".docx", ".doc"}
 _UPLOAD_DIR = "/app/uploads"
@@ -716,3 +739,92 @@ async def download_document(
         )
 
     raise HTTPException(404, "File non trovato su SharePoint né in locale")
+
+
+# ── Thumbnail endpoint ─────────────────────────────────────────────────────────
+
+@router.get("/documents/cert/{cert_id}/thumbnail")
+async def cert_thumbnail(
+    cert_id: str,
+    request: Request,
+    token: Optional[str] = Query(default=None, include_in_schema=False),
+):
+    """
+    Genera una miniatura PNG (prima pagina PDF) per una certificazione.
+    Usa LRU cache in-memory (max 50 entry).
+    Autenticazione via Bearer header o query param ?token=.
+    """
+    from app.security import decode_token
+
+    auth_header = request.headers.get("Authorization", "")
+    if auth_header.startswith("Bearer "):
+        jwt = auth_header[7:]
+    elif token:
+        jwt = token
+    else:
+        raise HTTPException(401, "Non autenticato")
+
+    try:
+        claims = decode_token(jwt)
+    except Exception:
+        raise HTTPException(401, "Token non valido")
+
+    email = claims.get("sub")
+    if not email or not store.get_user(email):
+        raise HTTPException(401, "Utente non trovato")
+
+    # Controlla cache
+    cached = _thumb_get(cert_id)
+    if cached is not None:
+        return Response(content=cached, media_type="image/png")
+
+    # Trova la cert
+    cert = next((c for c in store.get_certifications(email) if c["id"] == cert_id), None)
+    if not cert:
+        raise HTTPException(404, "Certificazione non trovata")
+
+    fp = cert.get("uploaded_file_path", "")
+    if not fp:
+        raise HTTPException(404, "Nessun file allegato")
+
+    # Leggi il contenuto del file
+    try:
+        if fp.startswith("sp:"):
+            content_bytes = await store._sp_download(fp[3:])
+            if not content_bytes:
+                raise HTTPException(404, "File non trovato su SharePoint")
+        else:
+            p = os.path.join("/app", fp.lstrip("/"))
+            if not os.path.isfile(p):
+                raise HTTPException(404, "File non trovato")
+            with open(p, "rb") as fh:
+                content_bytes = fh.read()
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(404, f"Errore lettura file: {e}")
+
+    # Genera thumbnail con PyMuPDF
+    try:
+        import fitz  # PyMuPDF
+        doc = fitz.open(stream=content_bytes, filetype="pdf")
+        page = doc[0]
+        mat = fitz.Matrix(0.4, 0.4)  # scala 0.4 → ~240px larghezza per A4
+        pix = page.get_pixmap(matrix=mat)
+        png_bytes = pix.tobytes("png")
+        doc.close()
+    except Exception:
+        raise HTTPException(404, "Impossibile generare thumbnail (file non PDF o errore)")
+
+    _thumb_set(cert_id, png_bytes)
+    return Response(content=png_bytes, media_type="image/png")
+
+
+@router.delete("/documents/cert/{cert_id}/thumbnail-cache", status_code=204)
+async def invalidate_cert_thumbnail_cache(
+    cert_id: str,
+    current_user: dict = Depends(get_current_user),
+):
+    """Invalida la cache thumbnail per una cert specifica (chiamare dopo upload nuovo doc)."""
+    if cert_id in _thumb_cache:
+        del _thumb_cache[cert_id]

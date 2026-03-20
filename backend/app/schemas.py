@@ -156,6 +156,7 @@ class CertificationBase(BaseModel):
     doc_url: Optional[str] = None
     has_formal_cert: bool = True
     credly_badge_id: Optional[str] = None
+    badge_image_url: Optional[str] = None
     tags: Optional[List[str]] = None
 
 

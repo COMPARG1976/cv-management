@@ -13,6 +13,7 @@ import {
   addCertification, updateCertification, deleteCertification,
   uploadCertDoc, deleteCertDoc, downloadCertDocUrl, downloadCredlyPdf,
   previewCredlyBadges, importCredlyBadges,
+  getCertLinkableBadges, linkCredlyBadge, certThumbnailUrl,
   searchCertCatalog, suggestCertCodes,
   getSkillSuggestions, getCertSuggestions,
   uploadCV, applyDiff, getCVHints,
@@ -1241,6 +1242,22 @@ function CertificazioniTab({ token, cv, setCV, hints = {} }) {
   const [credlyImportResult, setCredlyImportResult] = useState(null);  // {imported, updated}
   const [catalogSuggestions, setCatalogSuggestions] = useState({});    // {cert_id: {name,cert_code,vendor}}
 
+  // Credly merge state
+  const [credlyLinkableBadges, setCredlyLinkableBadges]   = useState([]);
+  const [certMergeModal, setCertMergeModal]               = useState(null);  // null | { pdfCert, credlyBadges }
+  const [mergeSelectedBadge, setMergeSelectedBadge]       = useState(null);
+  const [mergeChoices, setMergeChoices]                   = useState({});
+  const [mergeSaving, setMergeSaving]                     = useState(false);
+  const [mergeFilter, setMergeFilter]                     = useState("");
+  const [mergeToast, setMergeToast]                       = useState("");
+
+  // Carica badge linkabili al mount
+  useEffect(() => {
+    getCertLinkableBadges(token)
+      .then(data => setCredlyLinkableBadges(Array.isArray(data) ? data : []))
+      .catch(() => {});
+  }, [cv?.certifications]);
+
   const emptyForm = () => ({
     cert_code: "", name: "", issuing_org: "", year: "",
     version: "", expiry_date: "", notes: "", has_formal_cert: true,
@@ -1387,6 +1404,84 @@ function CertificazioniTab({ token, cv, setCV, hints = {} }) {
     }
   }
 
+  // ── Credly merge ────────────────────────────────────────────────────────────
+
+  function openMergeModal(pdfCert) {
+    setMergeSelectedBadge(null);
+    setMergeChoices({});
+    setMergeFilter("");
+    setCertMergeModal({ pdfCert, credlyBadges: credlyLinkableBadges });
+  }
+
+  function getMergeConflictFields(pdfCert, badge) {
+    const _MERGE_FIELDS = [
+      { key: "name",        label: "Nome" },
+      { key: "issuing_org", label: "Ente emittente" },
+      { key: "cert_code",   label: "Codice" },
+      { key: "year",        label: "Anno" },
+      { key: "expiry_date", label: "Scadenza" },
+    ];
+    return _MERGE_FIELDS.map(({ key, label }) => {
+      const pdfVal    = pdfCert[key] || "";
+      const credlyVal = badge[key]   || "";
+      const same      = String(pdfVal) === String(credlyVal);
+      const bothEmpty = !pdfVal && !credlyVal;
+      return { key, label, pdfVal, credlyVal, same, bothEmpty };
+    }).filter(f => !f.bothEmpty);
+  }
+
+  function isMergeReady() {
+    if (!mergeSelectedBadge || !certMergeModal) return false;
+    const { pdfCert } = certMergeModal;
+    const fields = getMergeConflictFields(pdfCert, mergeSelectedBadge);
+    // Tutti i campi con conflitto reale devono avere una scelta
+    return fields.every(f => {
+      if (f.same || !f.pdfVal || !f.credlyVal) return true; // auto-selezione, ok
+      return !!mergeChoices[f.key];
+    });
+  }
+
+  async function handleMerge() {
+    if (!certMergeModal || !mergeSelectedBadge) return;
+    const { pdfCert } = certMergeModal;
+    const fields = getMergeConflictFields(pdfCert, mergeSelectedBadge);
+
+    // Costruisci field_choices finali
+    const field_choices = {};
+    fields.forEach(f => {
+      if (f.same) return; // campo identico → nessuna scelta necessaria
+      if (!f.pdfVal && f.credlyVal) {
+        field_choices[f.key] = "credly";
+      } else if (f.pdfVal && !f.credlyVal) {
+        field_choices[f.key] = "pdf";
+      } else if (mergeChoices[f.key]) {
+        field_choices[f.key] = mergeChoices[f.key];
+      }
+    });
+
+    setMergeSaving(true);
+    try {
+      const updated = await linkCredlyBadge(token, pdfCert.id, {
+        credly_cert_id: mergeSelectedBadge.id,
+        field_choices,
+      });
+      setCV(prev => ({
+        ...prev,
+        certifications: prev.certifications
+          .filter(c => c.id !== mergeSelectedBadge.id)
+          .map(c => c.id === updated.id ? updated : c),
+      }));
+      setCredlyLinkableBadges(prev => prev.filter(b => b.id !== mergeSelectedBadge.id));
+      setCertMergeModal(null);
+      setMergeToast("Certificazioni collegate con successo");
+      setTimeout(() => setMergeToast(""), 3500);
+    } catch (e) {
+      setError(e.message);
+    } finally {
+      setMergeSaving(false);
+    }
+  }
+
   // ── Credly ──────────────────────────────────────────────────────────────────
 
   async function loadCredlyPreview() {
@@ -1454,8 +1549,41 @@ function CertificazioniTab({ token, cv, setCV, hints = {} }) {
           </div>
         ) : (
           certs.map(c => (
-            <div key={c.id} className="section-item">
-              <div className="section-item__body">
+            <div key={c.id} className="section-item" style={{ alignItems: "flex-start" }}>
+              {/* ── Modifica 1: Miniatura a sinistra ── */}
+              {(() => {
+                const thumbStyle = { width: 60, height: 60, objectFit: "cover", borderRadius: 8, flexShrink: 0, marginRight: 12 };
+                const avatarStyle = {
+                  width: 60, height: 60, borderRadius: 8, flexShrink: 0, marginRight: 12,
+                  background: "var(--color-bg-alt, #f0f4f8)",
+                  display: "flex", alignItems: "center", justifyContent: "center",
+                  fontSize: 18, fontWeight: 700, color: "var(--color-text-muted)",
+                  border: "1px solid var(--color-border)",
+                };
+                const initials = (c.issuing_org || c.name || "?").split(" ").map(w => w[0]).join("").slice(0, 2).toUpperCase();
+                if (c.doc_attachment_type === "CREDLY" || c.credly_badge_id) {
+                  if (c.badge_image_url) {
+                    return <img src={c.badge_image_url} alt="" loading="lazy" style={{ ...thumbStyle, objectFit: "contain", border: "1px solid var(--color-border)", padding: 4, background: "#fff" }} />;
+                  }
+                  return <div style={avatarStyle}>{"🎖"}</div>;
+                }
+                if (c.uploaded_file_path) {
+                  return (
+                    <img
+                      src={`${certThumbnailUrl(c.id)}?token=${token}`}
+                      alt=""
+                      loading="lazy"
+                      style={thumbStyle}
+                      onError={e => {
+                        e.target.style.display = "none";
+                        e.target.nextSibling && (e.target.nextSibling.style.display = "flex");
+                      }}
+                    />
+                  );
+                }
+                return <div style={avatarStyle}>{initials}</div>;
+              })()}
+              <div className="section-item__body" style={{ flex: 1 }}>
                 <div className="section-item__title">
                   {c.name}
                   {c.version && <span style={{ fontWeight: 400, color: "var(--color-text-muted)" }}> v{c.version}</span>}
@@ -1465,13 +1593,17 @@ function CertificazioniTab({ token, cv, setCV, hints = {} }) {
                   {c.doc_attachment_type === "SHAREPOINT" && (
                     <span style={{ marginLeft: 8, fontSize: 11, background: "#0078d4", color: "#fff", borderRadius: 4, padding: "2px 6px" }}>SharePoint</span>
                   )}
+                  {/* Badge "Collegato" se ha sia PDF che credly_badge_id */}
+                  {c.uploaded_file_path && c.credly_badge_id && (
+                    <span style={{ marginLeft: 8, fontSize: 11, background: "#7b2d8b", color: "#fff", borderRadius: 4, padding: "2px 6px" }}>PDF+Badge</span>
+                  )}
                 </div>
                 <div className="section-item__sub">
                   {c.issuing_org && <span>{c.issuing_org}</span>}
                   {c.year       && <span> · {c.year}</span>}
                   {c.cert_code  && <span> · {c.cert_code}</span>}
                   {c.expiry_date && <span> · Scade: <DateStr value={c.expiry_date} /></span>}
-                  {c.doc_url && c.doc_attachment_type !== "SHAREPOINT" && (
+                  {c.doc_url && c.doc_attachment_type !== "SHAREPOINT" && !c.credly_badge_id && (
                     <span> · <a href={c.doc_url} target="_blank" rel="noopener noreferrer">
                       {c.doc_attachment_type === "CREDLY" ? "Verifica badge" : "Verifica"}
                     </a></span>
@@ -1490,8 +1622,36 @@ function CertificazioniTab({ token, cv, setCV, hints = {} }) {
                 )}
                 {/* ── Azioni allegati ── */}
                 <div style={{ display: "flex", flexWrap: "wrap", gap: 6, marginTop: 6 }}>
-                  {/* File caricato dall'utente */}
-                  {c.uploaded_file_path && (
+                  {/* Modifica 4: se ha sia PDF che credly_badge_id → mostra entrambi i pulsanti */}
+                  {c.uploaded_file_path && c.credly_badge_id ? (
+                    <>
+                      <a
+                        href={`/api/cv/me/certifications/${c.id}/download-doc?token=${token}`}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="btn btn-secondary btn-sm"
+                        style={{ fontSize: 11 }}
+                      >
+                        📎 PDF
+                      </a>
+                      <a
+                        href={`https://www.credly.com/badges/${c.credly_badge_id}`}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="btn btn-secondary btn-sm"
+                        style={{ fontSize: 11 }}
+                      >
+                        🎖 Badge
+                      </a>
+                      <button
+                        className="btn btn-secondary btn-sm"
+                        style={{ fontSize: 11 }}
+                        onClick={() => handleDeleteCertDoc(c.id)}
+                      >
+                        🗑 Rimuovi allegato
+                      </button>
+                    </>
+                  ) : c.uploaded_file_path ? (
                     <>
                       <a
                         href={`/api/cv/me/certifications/${c.id}/download-doc?token=${token}`}
@@ -1510,7 +1670,7 @@ function CertificazioniTab({ token, cv, setCV, hints = {} }) {
                         🗑 Rimuovi allegato
                       </button>
                     </>
-                  )}
+                  ) : null}
                 </div>
                 {(() => {
                   const sug = catalogSuggestions[String(c.id)];
@@ -1560,6 +1720,17 @@ function CertificazioniTab({ token, cv, setCV, hints = {} }) {
                 })()}
               </div>
               <div className="section-item__actions">
+                {/* Modifica 2: voce "Collega badge Credly" disponibile se la cert ha PDF e ci sono badge linkabili */}
+                {c.uploaded_file_path && credlyLinkableBadges.length > 0 && (
+                  <button
+                    className="btn btn-secondary btn-sm"
+                    style={{ fontSize: 11, whiteSpace: "nowrap" }}
+                    title="Collega badge Credly"
+                    onClick={() => openMergeModal(c)}
+                  >
+                    🔗 Collega badge Credly
+                  </button>
+                )}
                 <button className="btn btn-secondary btn-sm" onClick={() => openEdit(c)}>✏</button>
                 <button className="btn btn-danger btn-sm" onClick={() => removeCert(c.id)}>Elimina</button>
               </div>
@@ -1876,6 +2047,145 @@ function CertificazioniTab({ token, cv, setCV, hints = {} }) {
             </div>
           )}
         </Modal>
+      )}
+
+      {/* ── Modifica 3: Modal merge Credly ────────────────────────────────── */}
+      {certMergeModal && (
+        <Modal
+          title={`Collega badge Credly a: ${certMergeModal.pdfCert.name}`}
+          onClose={() => setCertMergeModal(null)}
+          onSave={isMergeReady() ? handleMerge : null}
+          saving={mergeSaving}
+          saveLabel="Fondi →"
+        >
+          {error && <div className="alert alert--error">{error}</div>}
+
+          {/* Sezione 1: picker badge */}
+          <div className="form-group">
+            <label style={{ fontWeight: 600 }}>Seleziona badge Credly da collegare</label>
+            <input
+              value={mergeFilter}
+              onChange={e => setMergeFilter(e.target.value)}
+              placeholder="Filtra per nome..."
+              style={{ marginBottom: 8 }}
+            />
+            <div style={{ maxHeight: 220, overflowY: "auto", border: "1px solid var(--color-border)", borderRadius: 6 }}>
+              {certMergeModal.credlyBadges
+                .filter(b => !mergeFilter || b.name.toLowerCase().includes(mergeFilter.toLowerCase()))
+                .map(b => (
+                  <label key={b.id} style={{
+                    display: "flex", alignItems: "center", gap: 10, padding: "8px 12px",
+                    borderBottom: "1px solid var(--color-border)", cursor: "pointer",
+                    background: mergeSelectedBadge?.id === b.id ? "var(--color-bg-alt)" : "transparent",
+                  }}>
+                    <input
+                      type="radio"
+                      name="merge-badge"
+                      checked={mergeSelectedBadge?.id === b.id}
+                      onChange={() => { setMergeSelectedBadge(b); setMergeChoices({}); }}
+                      style={{ width: "auto", flexShrink: 0 }}
+                    />
+                    {b.badge_image_url && (
+                      <img src={b.badge_image_url} alt="" style={{ width: 36, height: 36, objectFit: "contain", flexShrink: 0 }} />
+                    )}
+                    <div style={{ flex: 1, minWidth: 0 }}>
+                      <div style={{ fontWeight: 500, fontSize: 13 }}>{b.name}</div>
+                      <div style={{ fontSize: 11, color: "var(--color-text-muted)" }}>
+                        {b.issuing_org && <span>{b.issuing_org}</span>}
+                        {b.year && <span> · {b.year}</span>}
+                      </div>
+                    </div>
+                  </label>
+                ))}
+              {certMergeModal.credlyBadges.filter(b => !mergeFilter || b.name.toLowerCase().includes(mergeFilter.toLowerCase())).length === 0 && (
+                <div style={{ padding: 16, color: "var(--color-text-muted)", fontSize: 13 }}>Nessun badge trovato</div>
+              )}
+            </div>
+          </div>
+
+          {/* Sezione 2: confronto campi (solo quando badge selezionato) */}
+          {mergeSelectedBadge && (() => {
+            const fields = getMergeConflictFields(certMergeModal.pdfCert, mergeSelectedBadge);
+            const conflictFields = fields.filter(f => !f.same && f.pdfVal && f.credlyVal);
+            const autoFields     = fields.filter(f => !f.same && (!f.pdfVal || !f.credlyVal));
+            const sameFields     = fields.filter(f => f.same);
+
+            return (
+              <div style={{ marginTop: 8 }}>
+                <label style={{ fontWeight: 600, display: "block", marginBottom: 8 }}>Confronto campi</label>
+                <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 12 }}>
+                  <thead>
+                    <tr style={{ background: "var(--color-bg-alt)" }}>
+                      <th style={{ padding: "6px 8px", textAlign: "left", border: "1px solid var(--color-border)" }}>Campo</th>
+                      <th style={{ padding: "6px 8px", textAlign: "left", border: "1px solid var(--color-border)" }}>Cert con PDF</th>
+                      <th style={{ padding: "6px 8px", textAlign: "left", border: "1px solid var(--color-border)" }}>Badge Credly</th>
+                      <th style={{ padding: "6px 8px", textAlign: "center", border: "1px solid var(--color-border)" }}>Scelta</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {sameFields.map(f => (
+                      <tr key={f.key} style={{ opacity: 0.65 }}>
+                        <td style={{ padding: "5px 8px", border: "1px solid var(--color-border)", fontWeight: 500 }}>{f.label}</td>
+                        <td colSpan={2} style={{ padding: "5px 8px", border: "1px solid var(--color-border)", color: "var(--color-text-muted)", fontStyle: "italic" }}>stesso valore: {String(f.pdfVal)}</td>
+                        <td style={{ padding: "5px 8px", border: "1px solid var(--color-border)", textAlign: "center", fontSize: 10, color: "var(--color-success)" }}>OK</td>
+                      </tr>
+                    ))}
+                    {autoFields.map(f => (
+                      <tr key={f.key} style={{ background: "#f0fff4" }}>
+                        <td style={{ padding: "5px 8px", border: "1px solid var(--color-border)", fontWeight: 500 }}>{f.label}</td>
+                        <td style={{ padding: "5px 8px", border: "1px solid var(--color-border)" }}>{f.pdfVal || <em style={{ color: "var(--color-text-muted)" }}>—</em>}</td>
+                        <td style={{ padding: "5px 8px", border: "1px solid var(--color-border)" }}>{f.credlyVal || <em style={{ color: "var(--color-text-muted)" }}>—</em>}</td>
+                        <td style={{ padding: "5px 8px", border: "1px solid var(--color-border)", textAlign: "center", fontSize: 10, color: "var(--color-success)", whiteSpace: "nowrap" }}>
+                          {!f.pdfVal ? "credly ✨ auto" : "pdf ✨ auto"}
+                        </td>
+                      </tr>
+                    ))}
+                    {conflictFields.map(f => (
+                      <tr key={f.key} style={{ background: "#fffde7" }}>
+                        <td style={{ padding: "5px 8px", border: "1px solid var(--color-border)", fontWeight: 500 }}>{f.label}</td>
+                        <td style={{ padding: "5px 8px", border: "1px solid var(--color-border)" }}>
+                          <label style={{ display: "flex", alignItems: "center", gap: 4, cursor: "pointer" }}>
+                            <input type="radio" name={`merge-${f.key}`} value="pdf"
+                              checked={mergeChoices[f.key] === "pdf"}
+                              onChange={() => setMergeChoices(prev => ({ ...prev, [f.key]: "pdf" }))}
+                              style={{ width: "auto" }} />
+                            {String(f.pdfVal)}
+                          </label>
+                        </td>
+                        <td style={{ padding: "5px 8px", border: "1px solid var(--color-border)" }}>
+                          <label style={{ display: "flex", alignItems: "center", gap: 4, cursor: "pointer" }}>
+                            <input type="radio" name={`merge-${f.key}`} value="credly"
+                              checked={mergeChoices[f.key] === "credly"}
+                              onChange={() => setMergeChoices(prev => ({ ...prev, [f.key]: "credly" }))}
+                              style={{ width: "auto" }} />
+                            {String(f.credlyVal)}
+                          </label>
+                        </td>
+                        <td style={{ padding: "5px 8px", border: "1px solid var(--color-border)", textAlign: "center" }}>
+                          {mergeChoices[f.key]
+                            ? <span style={{ fontSize: 10, color: "var(--color-success)" }}>OK</span>
+                            : <span style={{ fontSize: 10, color: "#e65100" }}>Scegli</span>}
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            );
+          })()}
+        </Modal>
+      )}
+
+      {/* ── Toast merge ───────────────────────────────────────────────────── */}
+      {mergeToast && (
+        <div style={{
+          position: "fixed", bottom: 24, right: 24, zIndex: 9999,
+          background: "#2e7d32", color: "#fff", borderRadius: 8,
+          padding: "12px 20px", fontSize: 14, fontWeight: 500,
+          boxShadow: "0 4px 16px rgba(0,0,0,0.2)",
+        }}>
+          {mergeToast}
+        </div>
       )}
     </>
   );

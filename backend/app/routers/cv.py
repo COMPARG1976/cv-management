@@ -114,6 +114,7 @@ def _row_to_cert(r: dict) -> CertificationResponse:
         doc_attachment_type=r.get("doc_attachment_type") or "NONE",
         doc_url=r.get("doc_url") or None,
         credly_badge_id=r.get("credly_badge_id") or None,
+        badge_image_url=r.get("badge_image_url") or None,
         uploaded_file_path=r.get("uploaded_file_path") or None,
         tags=tags or None,
         notes=r.get("notes") or None,
@@ -495,6 +496,77 @@ async def credly_import(payload: Dict, current_user: dict = Depends(get_current_
                  "doc_url": badge_url, "doc_attachment_type": "CREDLY", "has_formal_cert": True})
             imported += 1
     return {"imported": imported, "updated": updated, "total": imported + updated}
+
+
+# ── Credly link / merge ────────────────────────────────────────────────────────
+
+@router.get("/me/certifications/credly-linkable")
+async def credly_linkable(current_user: dict = Depends(get_current_user)) -> List[Dict]:
+    """Restituisce le cert Credly pure (badge senza PDF allegato) — candidati al merge."""
+    email = current_user["email"]
+    certs = store.get_certifications(email)
+    linkable = [
+        _row_to_cert(c).model_dump()
+        for c in certs
+        if c.get("credly_badge_id") and not c.get("uploaded_file_path")
+    ]
+    return linkable
+
+
+@router.post("/me/certifications/{cert_id}/link-credly")
+async def link_credly_badge(
+    cert_id: str,
+    payload: Dict,
+    current_user: dict = Depends(get_current_user),
+) -> Dict:
+    """
+    Merge di una cert con PDF (cert_id) e un badge Credly puro (credly_cert_id).
+    Il payload include field_choices: { campo: "pdf"|"credly" } per scegliere la sorgente
+    di ogni campo conflittuale.
+    """
+    email = current_user["email"]
+    certs = store.get_certifications(email)
+
+    pdf_cert = next((c for c in certs if c["id"] == cert_id), None)
+    if not pdf_cert:
+        _404("Certificazione PDF non trovata")
+
+    credly_cert_id = payload.get("credly_cert_id")
+    if not credly_cert_id:
+        raise HTTPException(400, "credly_cert_id obbligatorio")
+
+    credly_cert = next((c for c in certs if c["id"] == credly_cert_id), None)
+    if not credly_cert:
+        _404("Badge Credly non trovato")
+
+    if not pdf_cert.get("uploaded_file_path"):
+        raise HTTPException(400, "La cert PDF deve avere un file allegato (uploaded_file_path)")
+    if not credly_cert.get("credly_badge_id"):
+        raise HTTPException(400, "La cert Credly deve avere credly_badge_id valorizzato")
+
+    field_choices: Dict[str, str] = payload.get("field_choices", {})
+    _MERGE_FIELDS = ["name", "issuing_org", "year", "expiry_date", "cert_code"]
+
+    update_data: Dict[str, Any] = {}
+    for field in _MERGE_FIELDS:
+        choice = field_choices.get(field)
+        if choice == "credly":
+            update_data[field] = credly_cert.get(field, "")
+        elif choice == "pdf":
+            update_data[field] = pdf_cert.get(field, "")
+        # Se choice è None/assente → mantieni il valore esistente della cert PDF (nessun aggiornamento)
+
+    # Trasferisci credly_badge_id e badge_image_url dalla cert Credly
+    update_data["credly_badge_id"] = credly_cert.get("credly_badge_id", "")
+    update_data["badge_image_url"] = credly_cert.get("badge_image_url", "")
+    # doc_url: il badge URL come link secondario
+    badge_url = f"https://www.credly.com/badges/{credly_cert.get('credly_badge_id', '')}"
+    update_data["doc_url"] = badge_url
+
+    updated = await store.update_certification(email, cert_id, update_data)
+    await store.delete_certification(email, credly_cert_id)
+
+    return _row_to_cert(updated).model_dump()
 
 
 # ── Cert code suggest ─────────────────────────────────────────────────────────

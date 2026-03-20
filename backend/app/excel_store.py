@@ -121,7 +121,7 @@ HEADERS = {
                          "sort_order"],
     SHEET_CERTS:        ["id","email","name","issuing_org","cert_code","version","year",
                          "expiry_date","has_formal_cert","doc_attachment_type","doc_url",
-                         "credly_badge_id","uploaded_file_path","tags","notes"],
+                         "credly_badge_id","badge_image_url","uploaded_file_path","tags","notes"],
     SHEET_LANGUAGES:    ["id","email","language_name","level"],
     SHEET_DOCUMENTS:    ["id","email","doc_type","original_filename","sharepoint_path",
                          "sharepoint_url","upload_date","ai_updated","tags"],
@@ -908,6 +908,7 @@ async def add_certification(email: str, data: dict) -> dict:
                "doc_attachment_type": data.get("doc_attachment_type","NONE"),
                "doc_url": data.get("doc_url",""),
                "credly_badge_id": data.get("credly_badge_id",""),
+               "badge_image_url": data.get("badge_image_url",""),
                "uploaded_file_path": data.get("uploaded_file_path",""),
                "tags": " | ".join(tags) if isinstance(tags, list) else str(tags or ""),
                "notes": data.get("notes","")}
@@ -922,8 +923,9 @@ async def update_certification(email: str, cert_id: str, data: dict) -> dict:
         row = next((r for r in items if r["id"] == cert_id), None)
         if not row:
             raise KeyError(f"Certification {cert_id} non trovata")
+        _allowed = set(SHEET_COLUMNS[SHEET_CERTS])
         for k, v in data.items():
-            if k in row:
+            if k in row or k in _allowed:
                 if k == "tags" and isinstance(v, list):
                     row[k] = " | ".join(v)
                 else:

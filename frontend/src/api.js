@@ -393,3 +393,21 @@ export async function suggestCertCodes(token, names) {
 export async function refreshCertCatalog(token) {
   return apiFetch("/cv/cert-catalog/refresh", { method: "POST" }, token);
 }
+
+// ── Credly link / merge ────────────────────────────────────────────────────────
+
+export async function getCertLinkableBadges(token) {
+  return apiFetch("/cv/me/certifications/credly-linkable", {}, token);
+}
+
+export async function linkCredlyBadge(token, certId, payload) {
+  return apiFetch(
+    `/cv/me/certifications/${certId}/link-credly`,
+    { method: "POST", body: JSON.stringify(payload) },
+    token
+  );
+}
+
+export function certThumbnailUrl(certId) {
+  return `${BASE_URL}/upload/documents/cert/${certId}/thumbnail`;
+}
