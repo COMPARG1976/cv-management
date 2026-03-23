@@ -1,6 +1,6 @@
 """
 Dependency injection per FastAPI — auth e RBAC.
-Usa excel_store invece di SQLAlchemy.
+Storage: excel_store.py (STORE in-memory + master_cv.xlsx su SharePoint).
 """
 from fastapi import Depends, HTTPException, status
 from fastapi.security import OAuth2PasswordBearer

@@ -238,18 +238,16 @@
 | Componente | Tecnologia | Motivazione |
 |------------|------------|-------------|
 | Backend | FastAPI 0.116+ (Python 3.12) | Consistenza con IT_RESOURCE_MGMT, async nativo |
-| ORM | SQLAlchemy 2.0 | Consistenza progetto |
-| Database | PostgreSQL 15 | JSONB, array, full-text search, ENUM |
+| Storage | openpyxl + master_cv.xlsx su SharePoint | Nessun DB separato, zero infrastruttura aggiuntiva |
 | Frontend | React 18 + Vite 5 | Consistenza con IT_RESOURCE_MGMT, no Node.js locale |
-| Auth locale | JWT HS256 + passlib pbkdf2 | Consistenza progetto, Entra-ready |
+| Auth locale | JWT HS256 + passlib pbkdf2 | Backdoor dev/emergenza |
 | Auth SSO | Microsoft Entra ID (MSAL + Microsoft Graph) | Account aziendali esistenti |
 | AI | OpenAI API (gpt-4o) | Qualità parsing, tool use per structured output |
-| Export Excel | openpyxl | Già in stack |
-| Export PDF | docxtpl + template DOCX | Già avviato Sprint 5 |
+| Export PDF | docxtpl + template DOCX | Template Jinja2 su SharePoint |
 | Export JSON | json stdlib | Nativo Python |
-| Containerizzazione | Docker + Docker Compose | Richiesto, portabilità |
-| Reverse Proxy | Nginx (nel container frontend) | Consistenza, SPA routing |
-| File Storage | Volume Docker (SharePoint via link/Graph API) | Semplicità iniziale |
+| Containerizzazione | Docker + Docker Compose | 3 container: frontend, backend, ai-services |
+| Reverse Proxy | Nginx (nel container frontend) | SPA routing + /api proxy |
+| File Storage | SharePoint via Microsoft Graph API | CV e certificati in CER/ e CV/ |
 
 ### TR-DATA — Struttura Dati
 | ID | Requisito |

@@ -33,7 +33,6 @@
 
 | Porta Host | Container | Servizio |
 |------------|-----------|---------|
-| **5433** | 5432 | PostgreSQL |
 | **8002** | 8000 | Backend FastAPI |
 | **8003** | 8000 | AI Services |
 | **8082** | 80 | Frontend Nginx |
@@ -264,11 +263,12 @@ AUTH_PROVIDER=fake
 
 ## Note per Claude Code
 
-- Il DB PostgreSQL è sulla porta host **5433** (non 5432)
 - Il backend è sulla porta host **8002** (non 8000)
+- **Nessun PostgreSQL** — storage esclusivo su `master_cv.xlsx` in SharePoint via `excel_store.py`
 - Per il frontend React: **non usare `npm run dev` in Bash** → Node.js non è in PATH locale; usare Docker
 - Vite dev server sulla porta **5174** se avviato in Docker per sviluppo
 - AI service chiama OpenAI: assicurarsi che `OPENAI_API_KEY` sia in `.env`
 - Volume `uploads_data` condiviso tra `backend` e `ai-services`
 - Riferirsi a `CONTEXT.md` per decisioni architetturali già prese
 - Riferirsi a `REQUIREMENTS.md` per scope e priorità feature
+- Dominio produzione: `https://cv.mashfrogcloud.com`

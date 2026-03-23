@@ -1,6 +1,7 @@
 """
 Pydantic v2 schemas per request/response.
-Nessuna dipendenza da ORM/SQLAlchemy — tutti i tipi sono stringhe o primitivi.
+Storage: excel_store.py (STORE in-memory + master_cv.xlsx su SharePoint).
+Tutti i tipi sono stringhe o primitivi — nessun ORM.
 """
 from datetime import datetime, date
 from typing import Optional, List
