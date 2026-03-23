@@ -213,13 +213,18 @@ async def get_download_url(sp_path: str) -> str:
     """
     Restituisce un URL di download pre-firmato (valido ~1h) per un file SharePoint.
     sp_path: path relativo alla root del drive (senza 'sp:').
+
+    Il path viene URL-encoded per gestire caratteri speciali come '@' nelle email
+    (il simbolo '@' ha significato speciale nelle OData query string di Graph API).
     """
+    from urllib.parse import quote
     token    = await _get_token()
     drive_id = await _get_drive_id()
+    encoded  = quote(sp_path, safe="/")   # encode '@', spazi, ecc. — lascia '/' intatti
 
     async with httpx.AsyncClient(timeout=15) as client:
         resp = await client.get(
-            f"https://graph.microsoft.com/v1.0/drives/{drive_id}/root:/{sp_path}:",
+            f"https://graph.microsoft.com/v1.0/drives/{drive_id}/root:/{encoded}:",
             headers={"Authorization": f"Bearer {token}"},
         )
         resp.raise_for_status()

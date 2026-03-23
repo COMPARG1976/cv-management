@@ -329,7 +329,29 @@ async def update_certification(cert_id: str, data: CertificationCreate, current_
 
 @router.delete("/me/certifications/{cert_id}", status_code=204)
 async def delete_certification(cert_id: str, current_user: dict = Depends(get_current_user)):
-    await store.delete_certification(current_user["email"], cert_id)
+    email = current_user["email"]
+    # Recupera il path PRIMA di cancellare dal STORE (atomicità: prima STORE, poi file)
+    cert = next((c for c in store.get_certifications(email) if c["id"] == cert_id), None)
+    fp = cert.get("uploaded_file_path", "") if cert else ""
+    await store.delete_certification(email, cert_id)
+    # Pulizia file fisico (best-effort: non blocca se fallisce)
+    if fp:
+        if fp.startswith("sp:"):
+            from app.sharepoint import delete_file
+            try:
+                await delete_file(fp[3:])
+            except Exception:
+                pass
+        else:
+            p = os.path.join("/app", fp.lstrip("/"))
+            if os.path.exists(p):
+                try:
+                    os.remove(p)
+                except Exception:
+                    pass
+    # Invalida cache thumbnail
+    from app.routers.upload import _thumb_cache
+    _thumb_cache.pop(cert_id, None)
 
 
 @router.post("/me/certifications/{cert_id}/upload-doc", response_model=CertificationResponse)
@@ -354,8 +376,9 @@ async def upload_cert_doc(cert_id: str, file: UploadFile = File(...), current_us
             user_full_name=current_user.get("full_name", ""),
             cert_name=cert.get("name", ""),
         )
+        # Non tocchiamo doc_attachment_type: l'allegato fisico è indicato da uploaded_file_path
         r = await store.update_certification(email, cert_id,
-            {"uploaded_file_path": f"sp:{sp_path}", "doc_attachment_type": "SHAREPOINT"})
+            {"uploaded_file_path": f"sp:{sp_path}"})
     else:
         safe = f"cert_{cert_id}{ext}"
         d = os.path.join(settings.upload_dir, "certs", email)
@@ -374,18 +397,32 @@ async def delete_cert_doc(cert_id: str, current_user: dict = Depends(get_current
     if not cert:
         _404("Certificazione non trovata")
     fp = cert.get("uploaded_file_path", "")
-    if fp:
-        if fp.startswith("sp:"):
-            from app.sharepoint import delete_file
+    if not fp:
+        return
+    # Atomicità: aggiorna Excel PRIMA, poi elimina il file fisico.
+    # Se la delete fisica fallisce, il record è già pulito (nessun dangling path).
+    # Se la delete fisica non trova il file, lo ignoriamo silenziosamente.
+    # doc_attachment_type=SHAREPOINT era il vecchio modo per indicare "ha PDF" → va resettato a NONE.
+    update = {"uploaded_file_path": ""}
+    if cert.get("doc_attachment_type") == "SHAREPOINT":
+        update["doc_attachment_type"] = "NONE"
+    await store.update_certification(email, cert_id, update)
+    if fp.startswith("sp:"):
+        from app.sharepoint import delete_file
+        try:
+            await delete_file(fp[3:])
+        except Exception:
+            pass  # file già assente o locked: il record Excel è già pulito, va bene
+    else:
+        p = os.path.join("/app", fp.lstrip("/"))
+        if os.path.exists(p):
             try:
-                await delete_file(fp[3:])
+                os.remove(p)
             except Exception:
                 pass
-        else:
-            p = os.path.join("/app", fp.lstrip("/"))
-            if os.path.exists(p):
-                os.remove(p)
-        await store.update_certification(email, cert_id, {"uploaded_file_path": ""})
+    # Invalida cache thumbnail
+    from app.routers.upload import _thumb_cache
+    _thumb_cache.pop(cert_id, None)
 
 
 @router.get("/me/certifications/{cert_id}/download-doc")
@@ -428,7 +465,13 @@ async def download_cert_doc(
         raise HTTPException(404, "Nessun file allegato")
     if fp.startswith("sp:"):
         from app.sharepoint import get_download_url
-        return RedirectResponse(await get_download_url(fp[3:]))
+        try:
+            url = await get_download_url(fp[3:])
+            return RedirectResponse(url)
+        except Exception as e:
+            import logging
+            logging.getLogger(__name__).warning(f"SP download-url fallito per {fp}: {e}")
+            raise HTTPException(404, f"File non trovato su SharePoint (percorso: {fp[3:]})")
     p = os.path.join("/app", fp.lstrip("/"))
     if not os.path.exists(p):
         raise HTTPException(404, "File non trovato")

@@ -1,11 +1,1 @@
-{
-  "version": "0.0.1",
-  "configurations": [
-    {
-      "name": "cv-management",
-      "runtimeExecutable": "docker",
-      "runtimeArgs": ["compose", "-f", "C:/20.PROGETTI_CLAUDE_CODE/40.CV_MANAGEMENT/docker-compose.yml", "up", "-d"],
-      "port": 8082
-    }
-  ]
-}
+{"version":"0.0.1","configurations":[{"name":"cv-management","runtimeExecutable":"docker","runtimeArgs":["compose","-f","C:/20.PROGETTI_CLAUDE_CODE/40.CV_MANAGEMENT/docker-compose.yml","up"],"port":8082}]}

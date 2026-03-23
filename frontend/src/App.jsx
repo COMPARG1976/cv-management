@@ -1346,6 +1346,10 @@ function CertificazioniTab({ token, cv, setCV, hints = {} }) {
             ...prev,
             certifications: prev.certifications.map(c => c.id === updatedCert.id ? updatedCert : c),
           }));
+          // Invalida cache thumbnail: il file è cambiato
+          fetch(`/api/upload/documents/cert/${cert.id}/thumbnail-cache`, {
+            method: "DELETE", headers: { Authorization: `Bearer ${token}` }
+          }).catch(() => {});
         } catch (ue) {
           // Upload fallito ma cert salvata — mostra warning non bloccante
           setError(`Certificazione salvata, ma upload documento fallito: ${ue.message}`);
@@ -1365,6 +1369,7 @@ function CertificazioniTab({ token, cv, setCV, hints = {} }) {
   }
 
   async function removeCert(id) {
+    if (!window.confirm("Eliminare definitivamente questa certificazione? L'operazione non è reversibile.")) return;
     try {
       await deleteCertification(token, id);
       setCV(prev => ({ ...prev, certifications: prev.certifications.filter(c => c.id !== id) }));
@@ -1391,12 +1396,13 @@ function CertificazioniTab({ token, cv, setCV, hints = {} }) {
   }
 
   async function handleDeleteCertDoc(certId) {
+    if (!window.confirm("Rimuovere l'allegato PDF da questa certificazione?")) return;
     try {
       await deleteCertDoc(token, certId);
       setCV(prev => ({
         ...prev,
         certifications: prev.certifications.map(c =>
-          c.id === certId ? { ...c, uploaded_file_path: null } : c
+          c.id === certId ? { ...c, uploaded_file_path: null, doc_attachment_type: c.doc_attachment_type === "SHAREPOINT" ? "NONE" : c.doc_attachment_type } : c
         ),
       }));
     } catch (e) {
@@ -1550,9 +1556,10 @@ function CertificazioniTab({ token, cv, setCV, hints = {} }) {
         ) : (
           certs.map(c => (
             <div key={c.id} className="section-item" style={{ alignItems: "flex-start" }}>
-              {/* ── Modifica 1: Miniatura a sinistra ── */}
+              {/* ── Miniatura a sinistra ── */}
               {(() => {
                 const thumbStyle = { width: 60, height: 60, objectFit: "cover", borderRadius: 8, flexShrink: 0, marginRight: 12 };
+                const badgeStyle = { ...thumbStyle, objectFit: "contain", border: "1px solid var(--color-border)", padding: 4, background: "#fff" };
                 const avatarStyle = {
                   width: 60, height: 60, borderRadius: 8, flexShrink: 0, marginRight: 12,
                   background: "var(--color-bg-alt, #f0f4f8)",
@@ -1561,25 +1568,35 @@ function CertificazioniTab({ token, cv, setCV, hints = {} }) {
                   border: "1px solid var(--color-border)",
                 };
                 const initials = (c.issuing_org || c.name || "?").split(" ").map(w => w[0]).join("").slice(0, 2).toUpperCase();
-                if (c.doc_attachment_type === "CREDLY" || c.credly_badge_id) {
-                  if (c.badge_image_url) {
-                    return <img src={c.badge_image_url} alt="" loading="lazy" style={{ ...thumbStyle, objectFit: "contain", border: "1px solid var(--color-border)", padding: 4, background: "#fff" }} />;
-                  }
-                  return <div style={avatarStyle}>{"🎖"}</div>;
+
+                // Priorità: 1) badge Credly (immagine vettoriale pulita)
+                //            2) thumbnail prima pagina PDF
+                //            3) icona generica Credly (badge senza immagine)
+                //            4) avatar con iniziali
+
+                if (c.badge_image_url) {
+                  return <img src={c.badge_image_url} alt="" loading="lazy" style={badgeStyle} />;
                 }
                 if (c.uploaded_file_path) {
                   return (
-                    <img
-                      src={`${certThumbnailUrl(c.id)}?token=${token}`}
-                      alt=""
-                      loading="lazy"
-                      style={thumbStyle}
-                      onError={e => {
-                        e.target.style.display = "none";
-                        e.target.nextSibling && (e.target.nextSibling.style.display = "flex");
-                      }}
-                    />
+                    <div style={{ position: "relative", flexShrink: 0, marginRight: 12, width: 60, height: 60 }}>
+                      <img
+                        src={`${certThumbnailUrl(c.id)}?token=${token}`}
+                        alt=""
+                        loading="lazy"
+                        style={{ ...thumbStyle, marginRight: 0, position: "absolute", inset: 0 }}
+                        onError={e => {
+                          e.currentTarget.style.display = "none";
+                          const fb = e.currentTarget.parentElement.querySelector(".cert-thumb-fallback");
+                          if (fb) fb.style.display = "flex";
+                        }}
+                      />
+                      <div className="cert-thumb-fallback" style={{ ...avatarStyle, marginRight: 0, display: "none", position: "absolute", inset: 0 }}>{initials}</div>
+                    </div>
                   );
+                }
+                if (c.credly_badge_id) {
+                  return <div style={avatarStyle}>{"🎖"}</div>;
                 }
                 return <div style={avatarStyle}>{initials}</div>;
               })()}
@@ -1587,15 +1604,14 @@ function CertificazioniTab({ token, cv, setCV, hints = {} }) {
                 <div className="section-item__title">
                   {c.name}
                   {c.version && <span style={{ fontWeight: 400, color: "var(--color-text-muted)" }}> v{c.version}</span>}
-                  {c.doc_attachment_type === "CREDLY" && (
-                    <span style={{ marginLeft: 8, fontSize: 11, background: "#ff6b35", color: "#fff", borderRadius: 4, padding: "2px 6px" }}>Credly</span>
-                  )}
-                  {c.doc_attachment_type === "SHAREPOINT" && (
+                  {c.uploaded_file_path && (
                     <span style={{ marginLeft: 8, fontSize: 11, background: "#0078d4", color: "#fff", borderRadius: 4, padding: "2px 6px" }}>SharePoint</span>
                   )}
-                  {/* Badge "Collegato" se ha sia PDF che credly_badge_id */}
-                  {c.uploaded_file_path && c.credly_badge_id && (
-                    <span style={{ marginLeft: 8, fontSize: 11, background: "#7b2d8b", color: "#fff", borderRadius: 4, padding: "2px 6px" }}>PDF+Badge</span>
+                  {c.credly_badge_id && (
+                    <span style={{ marginLeft: 8, fontSize: 11, background: "#ff6b35", color: "#fff", borderRadius: 4, padding: "2px 6px" }}>Credly</span>
+                  )}
+                  {c.doc_attachment_type === "URL" && c.doc_url && !c.credly_badge_id && (
+                    <span style={{ marginLeft: 8, fontSize: 11, background: "#6c757d", color: "#fff", borderRadius: 4, padding: "2px 6px" }}>URL</span>
                   )}
                 </div>
                 <div className="section-item__sub">
@@ -1603,10 +1619,8 @@ function CertificazioniTab({ token, cv, setCV, hints = {} }) {
                   {c.year       && <span> · {c.year}</span>}
                   {c.cert_code  && <span> · {c.cert_code}</span>}
                   {c.expiry_date && <span> · Scade: <DateStr value={c.expiry_date} /></span>}
-                  {c.doc_url && c.doc_attachment_type !== "SHAREPOINT" && !c.credly_badge_id && (
-                    <span> · <a href={c.doc_url} target="_blank" rel="noopener noreferrer">
-                      {c.doc_attachment_type === "CREDLY" ? "Verifica badge" : "Verifica"}
-                    </a></span>
+                  {c.doc_url && c.doc_attachment_type === "URL" && !c.credly_badge_id && (
+                    <span> · <a href={c.doc_url} target="_blank" rel="noopener noreferrer">Verifica</a></span>
                   )}
                 </div>
                 {c.tags && c.tags.length > 0 && (
@@ -1720,8 +1734,8 @@ function CertificazioniTab({ token, cv, setCV, hints = {} }) {
                 })()}
               </div>
               <div className="section-item__actions">
-                {/* Modifica 2: voce "Collega badge Credly" disponibile se la cert ha PDF e ci sono badge linkabili */}
-                {c.uploaded_file_path && credlyLinkableBadges.length > 0 && (
+                {/* Collega badge Credly: solo se ha PDF ma NON ha ancora un badge Credly collegato */}
+                {c.uploaded_file_path && !c.credly_badge_id && credlyLinkableBadges.length > 0 && (
                   <button
                     className="btn btn-secondary btn-sm"
                     style={{ fontSize: 11, whiteSpace: "nowrap" }}
@@ -1826,11 +1840,10 @@ function CertificazioniTab({ token, cv, setCV, hints = {} }) {
           <div className="form-row">
             <div className="form-group">
               <label>Tipo documento/badge</label>
-              <select value={form.doc_attachment_type} onChange={e => { upd("doc_attachment_type", e.target.value); setUploadFile(null); }}>
+              <select value={form.doc_attachment_type === "SHAREPOINT" ? "NONE" : form.doc_attachment_type} onChange={e => { upd("doc_attachment_type", e.target.value); setUploadFile(null); }}>
                 <option value="NONE">Nessuno</option>
                 <option value="CREDLY">Credly / Badge digitale</option>
                 <option value="URL">URL pubblico</option>
-                <option value="SHAREPOINT">SharePoint aziendale</option>
               </select>
             </div>
             <div className="form-group" style={{ paddingTop: 24 }}>

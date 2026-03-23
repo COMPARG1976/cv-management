@@ -790,9 +790,14 @@ async def cert_thumbnail(
     # Leggi il contenuto del file
     try:
         if fp.startswith("sp:"):
-            content_bytes = await store._sp_download(fp[3:])
-            if not content_bytes:
-                raise HTTPException(404, "File non trovato su SharePoint")
+            # Usa get_download_url (path già assoluto nel drive, URL-encoded internamente)
+            # NON usare store._sp_download che prependerebbe il root folder una seconda volta
+            from app.sharepoint import get_download_url as _sp_get_url
+            signed_url = await _sp_get_url(fp[3:])
+            async with httpx.AsyncClient(timeout=30, follow_redirects=True) as dl_client:
+                dl_resp = await dl_client.get(signed_url)
+                dl_resp.raise_for_status()
+                content_bytes = dl_resp.content
         else:
             p = os.path.join("/app", fp.lstrip("/"))
             if not os.path.isfile(p):

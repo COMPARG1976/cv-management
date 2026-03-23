@@ -923,7 +923,7 @@ async def update_certification(email: str, cert_id: str, data: dict) -> dict:
         row = next((r for r in items if r["id"] == cert_id), None)
         if not row:
             raise KeyError(f"Certification {cert_id} non trovata")
-        _allowed = set(SHEET_COLUMNS[SHEET_CERTS])
+        _allowed = set(HEADERS[SHEET_CERTS])
         for k, v in data.items():
             if k in row or k in _allowed:
                 if k == "tags" and isinstance(v, list):
