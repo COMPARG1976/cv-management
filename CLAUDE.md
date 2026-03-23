@@ -271,4 +271,4 @@ AUTH_PROVIDER=fake
 - Volume `uploads_data` condiviso tra `backend` e `ai-services`
 - Riferirsi a `CONTEXT.md` per decisioni architetturali già prese
 - Riferirsi a `REQUIREMENTS.md` per scope e priorità feature
-- Dominio produzione: `https://cv.mashfrogcloud.com`
+- Dominio produzione: `https://cvapp.mashfrogcloud.com`

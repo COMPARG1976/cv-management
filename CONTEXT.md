@@ -11,7 +11,7 @@
 ┌─────────────────────────────────────────────────────────────────┐
 │            Browser (Utente / Admin)                             │
 │            DEV: http://localhost:8082                           │
-│            PRD: https://cv.mashfrogcloud.com                    │
+│            PRD: https://cvapp.mashfrogcloud.com                    │
 └────────────────────────┬────────────────────────────────────────┘
                          │ HTTPS :443 (PRD) / HTTP :8082 (DEV)
                          ▼
@@ -256,7 +256,7 @@ Frontend                    Backend                  Azure AD
 ### Variabili Entra richieste
 ```
 ENTRA_TENANT_ID, ENTRA_CLIENT_ID, ENTRA_CLIENT_SECRET, ENTRA_AUDIENCE
-ENTRA_REDIRECT_URI=https://cv.mashfrogcloud.com/auth/callback  # PRD
+ENTRA_REDIRECT_URI=https://cvapp.mashfrogcloud.com/auth/callback  # PRD
 ```
 
 ---
